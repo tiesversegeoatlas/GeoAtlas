@@ -122,6 +122,7 @@ create unique index if not exists uq_raw_source_item_id on raw_fetched_items (so
 create unique index if not exists uq_raw_source_hash on raw_fetched_items (source_id, content_hash);
 create index if not exists idx_normalized_source_published on normalized_items (source_id, published_at desc);
 create index if not exists idx_normalized_status_published on normalized_items (extraction_status, published_at desc);
+create index if not exists idx_normalized_canonical_url on normalized_items (canonical_url);
 create index if not exists idx_normalized_title_trgm on normalized_items using gin (title gin_trgm_ops);
 create index if not exists idx_item_locations_geog on normalized_item_locations using gist (geog);
 create index if not exists idx_admin_api_keys_active on admin_api_keys (active);

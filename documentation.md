@@ -40,6 +40,414 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-18 - Location False-Positive Cleanup
+
+**Developer:** Ahan
+
+**Goal:** Remove false locations such as months, legal phrases, and headline fragments that were incorrectly geocoded.
+
+**What changed:**
+- `backend/app/article_utils.py`: Replaced broad capitalized-phrase extraction with conservative headline-prefix, article-dateline, and known-place rules.
+- `backend/app/article_utils.py`: Added canonical country aliases and coordinates so country headlines do not require an ambiguous free-text geocoder lookup.
+- `backend/app/article_utils.py`: Added public/storage sanitization for months and non-geographic words.
+- `backend/app/feed_utils.py`: Added conservative UTF-8 mojibake repair for feed and article text.
+- `backend/app/main.py`: Recomputes conservative primary locations for public output and hides stale false coordinate rows.
+- `backend/app/feed_utils.py`, `backend/app/services.py`: Added RSS media-image fallback when article pages cannot be fetched.
+- `backend/scripts/cleanup_location_data.py`: Added dry-run/apply cleanup for historical invalid hints and locations.
+- `backend/tests/test_ingestion_quality.py`: Added regressions for the supplied AllAfrica false locations, country aliases, and broken character encoding.
+
+**How to run or verify:**
+- Run `python scripts/cleanup_location_data.py` from `backend` for a dry run.
+- Run `python scripts/cleanup_location_data.py --apply` to remove invalid stored location data.
+- Run `python -m unittest discover -s tests -v` from `backend`.
+- Restart the backend and query public items.
+
+**Output or result:**
+- `May`, `April`, `JUSTICE, Legal`, `Policy By July`, and similar phrases are no longer treated as locations.
+- Country-prefixed headlines and article datelines are prioritized.
+- `MÃ©decins Sans FrontiÃ¨res`-style text is repaired to valid Unicode.
+- Existing bad coordinates are suppressed publicly and can be deleted with the cleanup script.
+
+**Known issues or follow-ups:**
+- Sources that block article access retain RSS summary text and may not have an image unless the feed supplies media metadata.
+
+### 2026-06-18 - Article Location Enrichment And Reliable-Source Deduplication
+
+**Developer:** Ahan
+
+**Goal:** Derive news locations from article pages, enrich public news records, and keep the most reliable source when multiple sites report the same story.
+
+**What changed:**
+- `backend/app/article_utils.py`: Added article-page extraction for JSON-LD, Open Graph, Twitter metadata, body paragraphs, images, dates, location phrases, and configurable geocoding.
+- `backend/app/config.py`, `backend/.env.example`: Added geocoder URL, timeout, and rate-limit configuration.
+- `backend/app/models.py`: Added the ORM model for the existing `normalized_item_locations` PostGIS table.
+- `backend/app/services.py`: Enriches new normalized items from article pages and stores body, image, article time, location hints, coordinates, and PostGIS geography.
+- `backend/app/main.py`: Deduplicates public items and events by canonical URL/title similarity and keeps the source with the higher reliability score.
+- `backend/app/schemas.py`: Expanded public items with body, image, collection time, source feed URL, and structured locations.
+- `backend/db/geoatlas_data_collection_schema.sql`: Added a canonical URL index.
+- `backend/db/20260618_article_location_enrichment.sql`: Added an idempotent migration for existing Supabase databases.
+- `docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md`: Documented enrichment, public fields, geocoding, and deduplication.
+
+**How to run or verify:**
+- Configure geocoder settings in `backend/.env`.
+- Run ingestion for a working source.
+- Query `GET /api/v1/public/items` or `GET /api/v1/public/export.json`.
+- Confirm items include article body, image, publication/collection times, and locations.
+- Compare duplicate stories from different sources and confirm the public result uses the higher-reliability source.
+
+**Output or result:**
+- Location is inferred from the article page rather than RSS location fields.
+- Public news includes title, body/details, image, dates, source reliability, and geocoded locations.
+- Duplicate public stories are collapsed while raw source records remain stored.
+
+**Known issues or follow-ups:**
+- Article extraction is heuristic and intentionally dependency-light; difficult paywalled or JavaScript-only pages may fall back to RSS content.
+- Geocoding quality depends on the configured provider and location-name ambiguity.
+
+### 2026-06-18 - RSS Data Cleaning Monitor
+
+**Developer:** Ahan
+
+**Goal:** Make RSS health checking a visible, controllable data-cleaning workflow.
+
+**What changed:**
+- `backend/static/index.html`: Added health-check scope selection, a Stop action, and live checked/working/not-working/remaining counters.
+- `backend/static/app.js`: Unchecked sources are prioritized and can be checked separately from all existing sources.
+- `backend/static/app.js`: RSS checks run with bounded concurrency and update source cards and progress as each result finishes.
+- `backend/static/styles.css`: Added distinct `Checking` source styling and compact progress statistics.
+
+**How to run or verify:**
+- Choose `Check unchecked` after a CSV import, or `Check all sources` for a full cleanup pass.
+- Click `Check RSS health`.
+- Watch percentage, checked, working, not-working, and remaining totals.
+- Use `Stop` to stop scheduling additional source checks.
+
+**Output or result:**
+- New unchecked imports can be cleaned first.
+- Working sources become active and visible.
+- Broken sources become failing and remain hidden from public output.
+- The current page updates while checks complete.
+
+**Known issues or follow-ups:**
+- Stop waits for already-running checks to finish; it prevents new checks from starting.
+
+### 2026-06-18 - CSV Import Status Export
+
+**Developer:** Ahan
+
+**Goal:** Export the row-by-row result of the current CSV source import.
+
+**What changed:**
+- `backend/static/index.html`: Added `Export import status` to the CSV import panel.
+- `backend/static/app.js`: Exports every uploaded CSV row with its line, source fields, import status, and message.
+- `backend/static/app.js`: Supports `Ready`, `Not selected`, `Adding`, `Added`, `Skipped duplicate`, `Failed`, and `Invalid` statuses.
+
+**How to run or verify:**
+- Upload a CSV and optionally run the import.
+- Click `Export import status`.
+- Open `geoatlas-import-status-YYYY-MM-DD.csv`.
+
+**Output or result:**
+- The exported CSV records the import result for every uploaded link.
+- Failed and invalid rows include their error message.
+
+**Known issues or follow-ups:**
+- Import status exists in browser memory for the currently uploaded CSV and resets when the file is cleared or the page reloads.
+
+### 2026-06-18 - Bulk CSV Import And Timeout Recovery
+
+**Developer:** Ahan
+
+**Goal:** Fix CSV imports getting stuck or crashing when RSS servers time out.
+
+**What changed:**
+- `backend/app/feed_utils.py`: Converts socket read `TimeoutError` into a normal `FeedError` instead of an ASGI 500 traceback.
+- `backend/app/services.py`: Added database-only bulk source creation with duplicate URL fingerprint skipping.
+- `backend/app/main.py`: Added `POST /api/v1/sources/import`.
+- `backend/app/schemas.py`: Added bulk import request/result schemas for batches up to 500.
+- `backend/static/app.js`: Imports CSV rows in batches of 250 and maps backend results to `Added`, `Skipped duplicate`, or `Failed`.
+- `backend/static/app.js`: Removed per-row RSS detection from CSV import progress.
+- `backend/static/index.html`, `backend/static/styles.css`: Added an `Unchecked` source state for newly imported feeds awaiting RSS health validation.
+
+**How to run or verify:**
+- Restart the backend and refresh the Source Console.
+- Upload the CSV and click `Import selected`.
+- Confirm progress advances by batches and does not stop on a slow RSS server.
+- Run `Check RSS health` after import to validate and activate unchecked sources.
+
+**Output or result:**
+- CSV insertion uses database batches instead of thousands of sequential feed fetches.
+- Duplicate links are skipped by the database import service.
+- New sources remain hidden until health checked.
+- Feed timeouts return readable errors rather than crashing the ASGI request.
+
+**Known issues or follow-ups:**
+- RSS health validation remains a separate operation after bulk insertion.
+
+### 2026-06-18 - CSV Import Progress And Row Statuses
+
+**Developer:** Ahan
+
+**Goal:** Show visible CSV import progress and per-row results while database additions are running.
+
+**What changed:**
+- `backend/static/index.html`: Added a compact CSV import progress bar with percentage and status text.
+- `backend/static/app.js`: Added row statuses for `Ready`, `Adding`, `Added`, `Skipped duplicate`, and `Failed`.
+- `backend/static/app.js`: Added aggregate added/skipped/failed counts and efficient preview refreshes every 25 processed rows.
+- `backend/static/styles.css`: Reused the compact progress styling so CSV progress remains visible without cluttering the interface.
+
+**How to run or verify:**
+- Upload a CSV and click `Import selected`.
+- Watch the progress percentage and processed count.
+- Confirm row statuses change as imports complete.
+
+**Output or result:**
+- Import progress remains visible throughout long imports.
+- Duplicate rows are shown as skipped, successful rows as added, and errors as failed.
+
+**Known issues or follow-ups:**
+- New-source imports remain sequential because each source performs backend feed detection.
+
+### 2026-06-18 - Skip CSV Duplicates During Database Add
+
+**Developer:** Ahan
+
+**Goal:** Remove duplicate checking from CSV upload and simply skip duplicate sources when adding rows to the database.
+
+**What changed:**
+- `backend/static/app.js`: CSV upload now only parses and displays the file; it does not run duplicate API or RSS checks.
+- `backend/static/app.js`: Each selected row is submitted normally, and backend `already exists` responses are counted as skipped duplicates instead of failures.
+- `backend/static/app.js`: Skipped rows are labeled `Skipped duplicate` in the CSV preview.
+- `backend/static/index.html`: Removed the duplicate override selector and fixed import behavior to skip existing sources.
+
+**How to run or verify:**
+- Refresh the Source Console and upload a CSV.
+- Confirm rows appear immediately without a `checking...` phase.
+- Click `Import selected`.
+- Confirm existing database sources are reported as skipped and are not inserted again.
+
+**Output or result:**
+- CSV size no longer affects upload-time duplicate checking because no duplicate check runs during upload.
+- Database duplicate guards remain authoritative during import.
+
+**Known issues or follow-ups:**
+- Import duration still depends on network feed detection for genuinely new sources.
+
+### 2026-06-18 - Fast CSV Duplicate Precheck
+
+**Developer:** Ahan
+
+**Goal:** Fix CSV duplicate checking that remained on `checking...` for more than 30 minutes with a 6,008-row file.
+
+**What changed:**
+- `backend/app/main.py`: Bulk duplicate checking now loads and indexes stored source fingerprints once instead of querying all sources once per CSV row.
+- `backend/app/schemas.py`: Deep network feed detection is now off by default for bulk duplicate prechecks.
+- `backend/static/app.js`: Increased duplicate-check batches from 10 to 500 rows and disabled network feed discovery during upload/import prechecks.
+- `backend/static/app.js`: Added exact normalized source-name matching to catch stored sources whose discovered `feed_url` differs from the CSV `base url`.
+- `backend/static/index.html`: Updated the static asset version so browsers load the faster CSV logic.
+
+**How to run or verify:**
+- Restart the backend service.
+- Refresh `http://127.0.0.1:8000`.
+- Upload the CSV again.
+- Confirm the preview appears immediately and `checking...` completes quickly.
+
+**Output or result:**
+- Bulk database duplicate checks no longer perform thousands of database scans or RSS network fetches.
+- Existing rows are unselected using URL/site fingerprints and exact normalized source names.
+- The source-create backend still performs before/after feed-detection duplicate guards during actual import.
+
+**Known issues or follow-ups:**
+- A browser refresh is required to stop an already-running old duplicate-check request.
+
+### 2026-06-17 - Thorough CSV Duplicate Detection
+
+**Developer:** Ahan
+
+**Goal:** Stop CSV imports from re-adding sources that are already in the database, even when CSV URLs differ from stored feed URLs.
+
+**What changed:**
+- `backend/static/app.js`: CSV duplicate matching now compares against stored `feed_url` and `site_url` URL fingerprints.
+- `backend/static/app.js`: CSV load calls a backend duplicate check for locally unmatched rows and unselects matches found through feed detection.
+- `backend/static/app.js`: Import rechecks selected rows for duplicates immediately before saving and skips duplicates in skip mode.
+- `backend/app/services.py`: Added URL fingerprint matching and duplicate guards before and after feed detection in source creation.
+- `backend/app/main.py`: Added `POST /api/v1/sources/duplicates` for protected bulk duplicate checks.
+- `backend/app/schemas.py`: Added duplicate-check request and response models.
+- `docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md`: Documented CSV duplicate guardrails.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key.
+- Upload a CSV whose rows are already present in the database.
+- Confirm existing rows are counted as already in DB and start unselected.
+- Try importing with `Skip existing links` and confirm duplicates are skipped.
+
+**Output or result:**
+- CSV precheck catches exact URL matches, site/feed URL matches, normalized URL variants, and detected feed matches.
+- Backend create refuses duplicate sources even if a frontend check misses one.
+
+**Known issues or follow-ups:**
+- Deep duplicate checks fetch unmatched URLs and can take time for very large CSV files. A future worker-backed import could show row-level async progress.
+
+### 2026-06-17 - RSS Health Progress Bar
+
+**Developer:** Ahan
+
+**Goal:** Show RSS health-check progress visibly without cluttering the Sources controls.
+
+**What changed:**
+- `backend/static/index.html`: Moved health-check progress into a hidden compact progress bar below the source filters.
+- `backend/static/app.js`: Added a centralized progress updater for checked count, percent, and final working/not-working totals.
+- `backend/static/styles.css`: Styled the health progress as a slim bar that appears only during/after checks and keeps pagination uncluttered.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key.
+- Confirm the Sources panel is not cluttered before checks.
+- Click `Check RSS health` and confirm the progress bar fills while sources are checked.
+
+**Output or result:**
+- Health progress is visible as a bar with percentage and compact status text.
+- The pager row only shows source count and page navigation.
+
+**Known issues or follow-ups:**
+- The health check still runs sequentially in the browser. A future worker can provide resumable background progress.
+
+### 2026-06-17 - Automated RSS Health Checks
+
+**Developer:** Ahan
+
+**Goal:** Let the Source Console automatically check whether saved RSS feeds still work and flag sources without manually marking each one.
+
+**What changed:**
+- `backend/app/services.py`: Added RSS health-check logic that fetches and parses a source feed, marking it active/visible on success or failing/hidden on error.
+- `backend/app/main.py`: Added `POST /api/v1/sources/{source_id}/check-health`.
+- `backend/app/schemas.py`: Added a source health-check response model.
+- `backend/static/index.html`: Added a `Check RSS health` button and progress summary in the Sources panel.
+- `backend/static/app.js`: Added a check-all loop that loads all non-archived sources, checks each RSS feed one by one, updates progress, and refreshes source/output views.
+- `backend/static/styles.css`: Adjusted the source pager layout to fit health-check progress.
+- `docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md`: Documented automatic RSS health checks.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key.
+- Click `Check RSS health`.
+- Watch the Sources panel progress text update as feeds are checked.
+
+**Output or result:**
+- Working RSS feeds are marked active and visible.
+- Broken RSS feeds are marked failing, disabled, and hidden from public output.
+
+**Known issues or follow-ups:**
+- The UI checks sources sequentially to avoid request timeouts. A production scheduler or worker can run the same per-source endpoint in the background later.
+
+### 2026-06-17 - Source Management UI Layout
+
+**Developer:** Ahan
+
+**Goal:** Make working and not-working sources visually distinct and clean up the source management layout.
+
+**What changed:**
+- `backend/static/index.html`: Added source-panel classes for dedicated filter and pager layout.
+- `backend/static/app.js`: Reworked source cards into structured source info, health state, grouped actions, and destructive actions.
+- `backend/static/styles.css`: Added distinct working, not-working, and archived source treatments with left accents, health blocks, cleaner action grouping, and responsive layout rules.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key.
+- Check the Sources panel for working, not-working, and archived visual states.
+- Use `Working` and `Not working` controls on source cards.
+
+**Output or result:**
+- Working sources show a green accent and visible-output health state.
+- Not-working sources show a red accent and hidden-output health state.
+- Source actions are grouped so normal actions, health marking, and removal actions are easier to scan.
+
+**Known issues or follow-ups:**
+- Add bulk health marking later if large CSV imports need mass cleanup.
+
+### 2026-06-17 - Sources Pagination And Total Count
+
+**Developer:** Ahan
+
+**Goal:** Paginate the Sources display and show the total number of sources instead of only loading a fixed first batch.
+
+**What changed:**
+- `backend/app/main.py`: Added `offset`, search `q`, and `status` filters to `GET /api/v1/sources`.
+- `backend/app/main.py`: Returns `X-Total-Count`, `X-Limit`, and `X-Offset` headers for source list pagination and exposes those headers through CORS.
+- `backend/static/index.html`: Added source page size, previous/next buttons, and a source summary area.
+- `backend/static/app.js`: Added server-backed source pagination, total count display, page-size switching, and DB-backed search/status filtering.
+- `backend/static/app.js`: Keeps a separate full source index for CSV duplicate checks and the output source dropdown while the visible list remains paginated.
+- `docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md`: Documented source pagination behavior and headers.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key.
+- Confirm the Sources panel shows `Showing X-Y of Z sources`.
+- Use `Previous`, `Next`, page size, search, and status filters.
+
+**Output or result:**
+- The Sources panel is paginated.
+- Total matching source count is visible.
+- Search/status filters query the backend and reset to the first page.
+
+**Known issues or follow-ups:**
+- The CSV duplicate checker still loads a full source index in the browser. If source volume becomes very large, replace that with a backend bulk duplicate-check endpoint.
+
+### 2026-06-17 - Source Health Marking And Removal
+
+**Developer:** Ahan
+
+**Goal:** Let admins mark source links as working or not working, hide broken sources from public output, and permanently remove unwanted source links/data from the database.
+
+**What changed:**
+- `backend/app/schemas.py`: Added request/response models for manual source health marking and purge results.
+- `backend/app/main.py`: Added `POST /api/v1/sources/{source_id}/mark` to mark sources working or not working.
+- `backend/app/main.py`: Added `DELETE /api/v1/sources/{source_id}/purge` to delete a source plus its event candidates, normalized items, raw fetched items, and ingestion jobs.
+- `backend/app/main.py`: Updated public items/events queries so disabled or archived sources no longer appear in public output.
+- `backend/static/app.js`: Added source-card controls for `Mark working`, `Mark not working`, and `Remove from DB`.
+- `backend/static/styles.css`: Added compact styling for source visibility badges and muted hidden-source cards.
+- `docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md`: Documented source health and removal behavior.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key and refresh sources.
+- Click `Mark not working` on a source and confirm it becomes hidden from public API output.
+- Click `Mark working` to restore it.
+- Click `Remove from DB` only when the source and its collected data should be permanently deleted.
+
+**Output or result:**
+- Admins can manually classify source links as working or broken.
+- Broken/disabled sources are excluded from public source, item, event, and export output.
+- Removed sources are purged from the database instead of only archived.
+
+**Known issues or follow-ups:**
+- Marking is manual. A later job can auto-check feeds and suggest working/not-working status based on HTTP/feed parsing results.
+
+### 2026-06-17 - CSV Duplicate Precheck
+
+**Developer:** Ahan
+
+**Goal:** Make CSV uploads check existing stored sources first and keep already-saved links unselected by default.
+
+**What changed:**
+- `backend/static/app.js`: Compares each CSV `base url` against loaded source `feed_url` values when the CSV is parsed.
+- `backend/static/app.js`: Marks rows already present in the database as `Already in DB`, counts them in the CSV summary, and leaves them unchecked on initial load.
+- `backend/static/app.js`: Keeps duplicate rows manually selectable so the user can still override existing links when needed.
+
+**How to run or verify:**
+- Open `http://127.0.0.1:8000`.
+- Enter a valid generated admin key and load sources.
+- Upload a CSV with columns `source name`, `base url`, `category`, `region`, and `language`.
+- Confirm rows whose `base url` already exists are counted as already in DB and start unchecked.
+
+**Output or result:**
+- New CSV rows are selected for add by default.
+- Existing CSV rows are visible but unselected, reducing accidental duplicate imports.
+
+**Known issues or follow-ups:**
+- Matching is based on normalized CSV `base url` versus stored `feed_url`; redirected URLs or alternate feed aliases can still require backend duplicate handling.
+
 ### 2026-06-17 - CSV Source Import
 
 **Developer:** Ahan

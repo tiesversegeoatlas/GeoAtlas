@@ -23,6 +23,9 @@ class Settings:
     fetch_timeout_seconds: int = int(getenv("GEOATLAS_FETCH_TIMEOUT_SECONDS", "10"))
     max_feed_bytes: int = int(getenv("GEOATLAS_MAX_FEED_BYTES", "5242880"))
     user_agent: str = getenv("GEOATLAS_USER_AGENT", "GeoAtlasDataCollector/1.0")
+    geocoder_url: str | None = getenv("GEOATLAS_GEOCODER_URL", "https://nominatim.openstreetmap.org/search")
+    geocoder_timeout_seconds: int = int(getenv("GEOATLAS_GEOCODER_TIMEOUT_SECONDS", "5"))
+    geocoder_min_interval_seconds: float = float(getenv("GEOATLAS_GEOCODER_MIN_INTERVAL_SECONDS", "1.0"))
 
 
 @lru_cache

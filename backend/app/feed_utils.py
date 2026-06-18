@@ -98,6 +98,7 @@ def safe_fetch(url: str, etag: str | None = None, last_modified: str | None = No
         request = Request(current_url, headers=headers)
         try:
             response = opener.open(request, timeout=settings.fetch_timeout_seconds)
+            body = response.read(settings.max_feed_bytes + 1)
         except HTTPError as exc:
             if exc.code in {301, 302, 303, 307, 308} and exc.headers.get("Location"):
                 current_url = urljoin(current_url, exc.headers["Location"])
@@ -107,8 +108,8 @@ def safe_fetch(url: str, etag: str | None = None, last_modified: str | None = No
             raise FeedError(f"Source returned HTTP {exc.code}.") from exc
         except URLError as exc:
             raise FeedError(f"Could not fetch URL: {exc.reason}") from exc
-
-        body = response.read(settings.max_feed_bytes + 1)
+        except TimeoutError as exc:
+            raise FeedError(f"Source timed out after {settings.fetch_timeout_seconds} seconds.") from exc
         if len(body) > settings.max_feed_bytes:
             raise FeedError("Response is larger than the configured feed size limit.")
         final_url = response.geturl()
@@ -129,7 +130,39 @@ def strip_text(value: str | None) -> str | None:
     text = re.sub(r"<[^>]+>", " ", value)
     text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
+    text = repair_mojibake(text)
     return text or None
+
+
+def repair_mojibake(value: str) -> str:
+    """Repair common UTF-8 text that was mistakenly decoded as Latin-1/CP1252."""
+    if not any(marker in value for marker in ("Ã", "Â", "â€", "â€™", "ðŸ")):
+        return value
+    candidates = [value]
+    for encoding in ("latin-1", "cp1252"):
+        try:
+            candidates.append(value.encode(encoding).decode("utf-8"))
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+    return min(candidates, key=_mojibake_score)
+
+
+def _mojibake_score(value: str) -> tuple[int, int]:
+    markers = sum(value.count(marker) for marker in ("Ã", "Â", "â€", "â€™", "ðŸ", "�"))
+    controls = sum(1 for character in value if ord(character) < 32 and character not in "\t\n\r")
+    return markers + controls, len(value)
+
+
+def decode_html(body: bytes, content_type: str = "") -> str:
+    charset_match = re.search(r"charset\s*=\s*[\"']?([\w.-]+)", content_type, re.IGNORECASE)
+    encodings = [charset_match.group(1)] if charset_match else []
+    encodings.extend(["utf-8", "cp1252"])
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return repair_mojibake(body.decode(encoding))
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return repair_mojibake(body.decode("utf-8", errors="replace"))
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -193,6 +226,7 @@ def _parse_rss(root: ElementTree.Element, feed_url: str) -> dict[str, Any]:
         summary = _find_text(item, ["description", "summary"])
         published = _find_text(item, ["pubdate", "published", "updated", "date"])
         categories = [_text(child) for child in item if child.tag.split("}", 1)[-1].lower() == "category"]
+        image_url = _item_image_url(item)
         items.append(
             {
                 "id": guid or link or title,
@@ -200,6 +234,7 @@ def _parse_rss(root: ElementTree.Element, feed_url: str) -> dict[str, Any]:
                 "title": title,
                 "summary": summary,
                 "published_at": parse_dt(published),
+                "image_url": image_url,
                 "categories": [category for category in categories if category],
                 "raw": {child.tag.split('}', 1)[-1]: child.text for child in item},
             }
@@ -236,6 +271,7 @@ def _parse_atom(root: ElementTree.Element, feed_url: str) -> dict[str, Any]:
             for child in entry
             if child.tag.split("}", 1)[-1].lower() == "category" and child.attrib.get("term")
         ]
+        image_url = _item_image_url(entry)
         items.append(
             {
                 "id": _find_text(entry, ["id"]) or link_url or _find_text(entry, ["title"]),
@@ -243,6 +279,7 @@ def _parse_atom(root: ElementTree.Element, feed_url: str) -> dict[str, Any]:
                 "title": _find_text(entry, ["title"]),
                 "summary": _find_text(entry, ["summary", "content"]),
                 "published_at": parse_dt(_find_text(entry, ["published", "updated"])),
+                "image_url": image_url,
                 "categories": categories,
                 "raw": {child.tag.split('}', 1)[-1]: child.text for child in entry},
             }
@@ -257,9 +294,23 @@ def _parse_atom(root: ElementTree.Element, feed_url: str) -> dict[str, Any]:
     }
 
 
+def _item_image_url(node: ElementTree.Element) -> str | None:
+    for child in node.iter():
+        clean = child.tag.split("}", 1)[-1].lower()
+        if clean in {"content", "thumbnail", "enclosure"}:
+            url = child.attrib.get("url") or child.attrib.get("href")
+            media_type = child.attrib.get("type", "")
+            medium = child.attrib.get("medium", "")
+            if url and (clean == "thumbnail" or medium == "image" or media_type.startswith("image/")):
+                return url
+        if clean in {"image", "imageurl"} and child.text:
+            return child.text.strip()
+    return None
+
+
 def discover_feeds_from_html(body: bytes, base_url: str) -> tuple[str | None, list[str]]:
     parser = FeedLinkParser()
-    parser.feed(body.decode("utf-8", errors="ignore"))
+    parser.feed(decode_html(body))
     return parser.title, [urljoin(base_url, link) for link in parser.links]
 
 

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GeoAtlas Source Console</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260618-health-cleaner" />
   </head>
   <body>
     <main class="shell">
@@ -87,22 +87,29 @@
               <input id="csvFile" type="file" accept=".csv,text/csv" />
             </label>
             <div class="toolbar">
-              <select id="duplicateMode">
-                <option value="skip">Skip existing links</option>
-                <option value="override">Override existing links</option>
-              </select>
+              <input id="duplicateMode" type="hidden" value="skip" />
               <button type="button" id="selectAllCsv" disabled>Select all</button>
               <button type="button" id="clearCsv" disabled>Clear CSV</button>
             </div>
             <div class="actions">
               <button type="button" class="primary" id="importCsv" disabled>Import selected</button>
+              <button type="button" id="exportImportStatus" disabled>Export import status</button>
               <span class="meta" id="csvSummary">No CSV loaded.</span>
+            </div>
+            <div class="import-progress" id="csvImportProgress" hidden>
+              <div class="import-progress-row">
+                <span id="csvImportStatus">Waiting to import.</span>
+                <span id="csvImportPercent">0%</span>
+              </div>
+              <div class="progress-track" aria-hidden="true">
+                <div class="progress-fill" id="csvImportFill"></div>
+              </div>
             </div>
             <div id="csvPreview" class="csv-preview empty">Upload a CSV to review sources before adding them.</div>
           </section>
         </section>
 
-        <section class="panel">
+        <section class="panel sources-panel">
           <div class="panel-heading">
             <div>
               <h2>Detection</h2>
@@ -121,17 +128,51 @@
               <p>Manage collection sources and trigger ingestion.</p>
             </div>
             <div class="button-group">
+              <select id="healthCheckScope" aria-label="RSS health check scope">
+                <option value="unchecked">Check unchecked</option>
+                <option value="all">Check all sources</option>
+              </select>
+              <button type="button" id="checkSourceHealth">Check RSS health</button>
+              <button type="button" id="stopSourceHealth" disabled>Stop</button>
               <button type="button" id="refreshSources">Refresh</button>
             </div>
           </div>
-          <div class="toolbar">
+          <div class="toolbar source-toolbar">
             <input id="sourceSearch" type="search" placeholder="Search sources" />
             <select id="sourceStatus">
               <option value="all">All statuses</option>
               <option value="active">Active</option>
+              <option value="unchecked">Unchecked</option>
               <option value="failing">Failing</option>
               <option value="archived">Archived</option>
             </select>
+            <select id="sourcePageSize" aria-label="Sources per page">
+              <option value="25">25 per page</option>
+              <option value="50">50 per page</option>
+              <option value="100">100 per page</option>
+            </select>
+          </div>
+          <div class="health-progress" id="sourceHealthProgress" hidden>
+            <div class="health-progress-row">
+              <span id="sourceHealthSummary">RSS health not checked.</span>
+              <span id="sourceHealthPercent">0%</span>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <div class="progress-fill" id="sourceHealthFill"></div>
+            </div>
+            <div class="health-progress-stats">
+              <span><strong id="sourceHealthChecked">0</strong> checked</span>
+              <span class="health-stat-good"><strong id="sourceHealthWorking">0</strong> working</span>
+              <span class="health-stat-bad"><strong id="sourceHealthFailing">0</strong> not working</span>
+              <span><strong id="sourceHealthRemaining">0</strong> remaining</span>
+            </div>
+          </div>
+          <div class="pager source-pager">
+            <span class="meta" id="sourceSummary">0 sources</span>
+            <div class="button-group">
+              <button type="button" id="prevSources" disabled>Previous</button>
+              <button type="button" id="nextSources" disabled>Next</button>
+            </div>
           </div>
           <div id="sourceList" class="source-list"></div>
         </section>
@@ -162,6 +203,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260618-health-cleaner"></script>
   </body>
 </html>

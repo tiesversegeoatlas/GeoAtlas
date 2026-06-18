@@ -53,6 +53,19 @@ class SourceUpdate(BaseModel):
     detected_language: str | None = None
 
 
+class SourceMarkRequest(BaseModel):
+    working: bool
+
+
+class SourcePurgeResponse(BaseModel):
+    source_id: str
+    deleted_events: int
+    deleted_normalized_items: int
+    deleted_raw_items: int
+    deleted_jobs: int
+    deleted_sources: int
+
+
 class SourceResponse(BaseModel):
     id: str
     name: str
@@ -75,6 +88,46 @@ class SourceResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SourceHealthCheckResponse(BaseModel):
+    source: SourceResponse
+    working: bool
+    message: str
+
+
+class SourceDuplicateCheckRequest(BaseModel):
+    urls: list[str]
+    detect_unmatched: bool = False
+
+
+class SourceDuplicateCheckItem(BaseModel):
+    url: str
+    duplicate_id: str | None = None
+    duplicate_name: str | None = None
+    matched_by: str | None = None
+
+
+class SourceDuplicateCheckResponse(BaseModel):
+    items: list[SourceDuplicateCheckItem]
+
+
+class SourceBulkImportRequest(BaseModel):
+    sources: list[SourceCreate] = Field(min_length=1, max_length=500)
+
+
+class SourceBulkImportItem(BaseModel):
+    feed_url: str
+    status: str
+    source_id: str | None = None
+    message: str | None = None
+
+
+class SourceBulkImportResponse(BaseModel):
+    added: int
+    skipped: int
+    failed: int
+    items: list[SourceBulkImportItem]
 
 
 class JobResponse(BaseModel):
@@ -101,9 +154,18 @@ class IngestResponse(BaseModel):
 class PublicSource(BaseModel):
     id: str
     name: str
+    feed_url: str
     site_url: str | None
     reliability_score: float
     last_success_at: datetime | None
+
+
+class PublicLocation(BaseModel):
+    name: str
+    country_code: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    confidence: float | None = None
 
 
 class PublicItem(BaseModel):
@@ -112,10 +174,14 @@ class PublicItem(BaseModel):
     canonical_url: str | None
     title: str
     summary: str | None
+    body: str | None
+    image_url: str | None
     language: str | None
     published_at: datetime | None
+    collected_at: datetime
     category_hints: list[str] | None
     location_hints: list[dict] | None
+    locations: list[PublicLocation]
     extraction_status: str
 
 

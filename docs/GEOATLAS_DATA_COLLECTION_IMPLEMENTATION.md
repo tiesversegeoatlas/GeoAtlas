@@ -22,7 +22,11 @@ The service provides:
 | --- | --- |
 | Feed detection | `POST /api/v1/sources/detect` |
 | Save RSS/Atom source | `POST /api/v1/sources/rss` |
+| Bulk CSV source insert | `POST /api/v1/sources/import` |
 | Manage sources | `GET/PATCH/DELETE /api/v1/sources/*` |
+| Mark source health | `POST /api/v1/sources/{source_id}/mark` |
+| Check RSS health | `POST /api/v1/sources/{source_id}/check-health` |
+| Permanently remove source data | `DELETE /api/v1/sources/{source_id}/purge` |
 | Manual ingestion | `POST /api/v1/sources/{source_id}/ingest` |
 | Job status | `GET /api/v1/ingestion/jobs` and `GET /api/v1/ingestion/jobs/{job_id}` |
 | Public output | `GET /api/v1/public/items`, `/api/v1/public/events`, `/api/v1/public/sources`, `/api/v1/public/export.json` |
@@ -44,11 +48,12 @@ Behavior:
 | --- | --- |
 | Upload | Browser parses the CSV locally and previews every row before importing. |
 | Validate | Rows missing `source name` or `base url`, or rows with invalid URLs, are marked invalid and cannot be selected. |
-| Duplicate check | `base url` is compared against existing source `feed_url` values loaded from the backend. |
+| Duplicate check | `base url` is compared against existing source `feed_url` and `site_url` values using normalized URL fingerprints. Rows already in the database are counted and start unselected. |
+| Deep duplicate check | Rows not matched locally call `POST /api/v1/sources/duplicates`, which can detect the RSS feed behind a website URL and match it to an existing stored source. |
 | Select rows | Each valid row can be selected or unselected. `Select all` toggles all valid rows. |
-| Duplicate action | Choose `Skip existing links` or `Override existing links` before importing. |
-| Add new | New selected rows call `POST /api/v1/sources/rss`. |
-| Override | Duplicate selected rows call `PATCH /api/v1/sources/{source_id}` for source name, category, region, language, and enabled state. |
+| Duplicate action | Existing URL fingerprints are skipped automatically by the bulk import endpoint. |
+| Add new | Selected rows are sent to `POST /api/v1/sources/import` in browser batches of 250. |
+| Validate later | Added rows start as `unchecked` and disabled; run RSS health checks to mark working feeds active. |
 
 CSV column mapping:
 
@@ -59,6 +64,54 @@ CSV column mapping:
 | `category` | `category_scope` |
 | `region` | `country_scope` |
 | `language` | `detected_language` or create-time language override |
+
+CSV imports use `POST /api/v1/sources/import` in batches of up to 500. This path does not fetch RSS feeds while inserting. New rows are stored as `unchecked` and disabled from public output until the RSS health checker validates them. Existing URL fingerprints are returned as skipped duplicates.
+
+## Source Health And Removal
+
+The Source Console lets an admin manually mark RSS sources as working or not working.
+
+| Action | Backend behavior | Public output behavior |
+| --- | --- | --- |
+| Mark working | `POST /api/v1/sources/{source_id}/mark` with `{"working": true}` sets `status=active`, `enabled=true`, and clears the manual error. | Source and its collected items/events can appear in public API output. |
+| Mark not working | `POST /api/v1/sources/{source_id}/mark` with `{"working": false}` sets `status=failing`, `enabled=false`, and stores a manual error note. | Source, items, and events are hidden from public API output. |
+| Check RSS health | `POST /api/v1/sources/{source_id}/check-health` fetches and parses the RSS/Atom feed. A successful parse sets `status=active`, `enabled=true`, and updates success metadata. A failed fetch or parse sets `status=failing`, `enabled=false`, and stores the error. | Working sources remain visible; failing sources are hidden. |
+| Archive | `DELETE /api/v1/sources/{source_id}` sets `archived=true`, `enabled=false`, and `status=archived`. | Source is hidden from public output but remains in the database. |
+| Remove from DB | `DELETE /api/v1/sources/{source_id}/purge` deletes the source, ingestion jobs, raw fetched items, normalized items, and event candidates for that source. | Source and all collected output for it are permanently removed. |
+
+Public item/event endpoints join against `external_sources` and only return records whose source is enabled and not archived.
+
+The Source Console `Check RSS health` button loads all non-archived sources and calls the per-source health endpoint one by one so progress stays visible and a single long request does not time out.
+
+The CSV panel `Export import status` action downloads the current uploaded rows with their source fields, import outcome, and error message.
+
+## Source List Pagination
+
+Admin source listing supports server-side pagination and total counts:
+
+```text
+GET /api/v1/sources?include_archived=true&limit=25&offset=0&q=search&status=active
+```
+
+Response body remains a JSON array of sources for compatibility. Pagination metadata is returned in response headers:
+
+| Header | Meaning |
+| --- | --- |
+| `X-Total-Count` | Total sources matching the current filters. |
+| `X-Limit` | Page size used by the response. |
+| `X-Offset` | Starting offset used by the response. |
+
+The Source Console uses this for the visible source cards. It separately loads a full source index in the background for CSV duplicate checks and the output source dropdown.
+
+## CSV Duplicate Guardrails
+
+CSV import has two duplicate guardrails:
+
+| Layer | Behavior |
+| --- | --- |
+| UI precheck | Compares CSV URLs against loaded source `feed_url` and `site_url` fingerprints. It ignores protocol, `www`, trailing slashes, and common feed suffixes such as `/feed`, `/rss.xml`, and `/feed/atom`. |
+| Backend precheck | `POST /api/v1/sources/duplicates` checks unmatched CSV URLs. When requested, it fetches/detects the feed behind each URL and compares the detected feed/site URLs against stored sources. |
+| Create guard | `POST /api/v1/sources/rss` checks for duplicates before detection and again after feed detection, so duplicate sources are rejected even if the UI misses one. |
 
 ## Supabase Postgres + PostGIS
 
@@ -130,6 +183,55 @@ GET /api/v1/public/export.json
 ```
 
 These endpoints intentionally return sanitized records only. Raw payloads and internal job errors stay behind admin endpoints.
+
+Public news items now include:
+
+| Field | Meaning |
+| --- | --- |
+| `title` | Enriched article headline, falling back to the RSS title. |
+| `summary` | Article metadata description, falling back to the RSS summary. |
+| `body` | Extracted article body text. |
+| `image_url` | Article JSON-LD/Open Graph/Twitter image. |
+| `published_at` | Article publication timestamp, falling back to RSS time. |
+| `collected_at` | Time GeoAtlas stored the normalized item. |
+| `canonical_url` | Original article URL. |
+| `locations` | Geocoded location records with name, coordinates, country, and confidence. |
+| `location_hints` | Location evidence and inference metadata from article text. |
+| `source` | Source identity and reliability score used for duplicate ranking. |
+
+## Article And Location Enrichment
+
+For each new RSS item with an article URL, ingestion fetches the article page and attempts to extract:
+
+- JSON-LD `NewsArticle` or `Article` fields.
+- Open Graph and Twitter title, description, image, and publication metadata.
+- Article paragraphs as body-text fallback.
+- Location phrases from the article headline and body.
+- Coordinates through the configured geocoder.
+
+Location configuration:
+
+```text
+GEOATLAS_GEOCODER_URL=https://nominatim.openstreetmap.org/search
+GEOATLAS_GEOCODER_TIMEOUT_SECONDS=5
+GEOATLAS_GEOCODER_MIN_INTERVAL_SECONDS=1.0
+```
+
+Known country names and AllAfrica country-prefix aliases use canonical country codes and coordinates directly. Only conservative dateline candidates require the external geocoder; low-quality place types such as shops, roads, and buildings are rejected. Geocoder results are cached in-process and rate limited. Set `GEOATLAS_GEOCODER_URL=` to disable external geocoding while retaining text-based location hints.
+
+The best geocoded result is stored in `normalized_item_locations`, including latitude/longitude and the PostGIS `geography(Point, 4326)` value. Evidence and alternate candidates remain in `normalized_items.location_hints`.
+
+For an existing Supabase database, run `backend/db/20260618_article_location_enrichment.sql` in the Supabase SQL Editor. The migration is idempotent.
+
+## Cross-Source Story Deduplication
+
+GeoAtlas retains every source item internally for provenance. Public item/event endpoints collapse likely duplicate stories using:
+
+- Exact normalized canonical URL.
+- Strong normalized-title token similarity.
+- A 72-hour publication window.
+
+When two sources report the same story, the public API keeps the item from the source with the higher `reliability_score`.
 
 ## Current Limits
 

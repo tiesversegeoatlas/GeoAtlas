@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -106,6 +106,22 @@ class NormalizedItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     source: Mapped[ExternalSource] = relationship(back_populates="normalized_items")
+    locations: Mapped[list["NormalizedItemLocation"]] = relationship(back_populates="item")
+
+
+class NormalizedItemLocation(Base):
+    __tablename__ = "normalized_item_locations"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=new_id)
+    normalized_item_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("normalized_items.id"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    country_code: Mapped[str | None] = mapped_column(String(8))
+    latitude: Mapped[float | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[float | None] = mapped_column(Numeric(9, 6))
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    item: Mapped[NormalizedItem] = relationship(back_populates="locations")
 
 
 class EventCandidate(Base):

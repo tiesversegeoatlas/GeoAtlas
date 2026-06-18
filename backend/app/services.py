@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
+from app.article_utils import extract_article, geocode_location, infer_location_candidates, sanitize_location_hints
 from app.feed_utils import (
     FeedError,
     discover_feeds_from_html,
@@ -15,7 +18,42 @@ from app.feed_utils import (
     parse_feed_bytes,
     safe_fetch,
 )
-from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, RawFetchedItem
+from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, NormalizedItemLocation, RawFetchedItem
+
+
+def url_fingerprints(value: str | None) -> set[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return set()
+    fingerprints = {raw.rstrip("/").lower()}
+    parsed = urlparse(raw)
+    if parsed.hostname:
+        host = parsed.hostname.lower().removeprefix("www.")
+        path = parsed.path.rstrip("/") or "/"
+        query = f"?{parsed.query}" if parsed.query else ""
+        fingerprints.add(f"{host}{path}{query}")
+        fingerprints.add(f"{host}{path}")
+        for suffix in ("/feed/atom", "/rss.xml", "/feed.xml", "/feed", "/rss", "/atom"):
+            if path.lower().endswith(suffix):
+                stripped = path[: -len(suffix)].rstrip("/") or "/"
+                fingerprints.add(f"{host}{stripped}")
+    else:
+        fingerprints.add(raw.removeprefix("https://").removeprefix("http://").removeprefix("www.").rstrip("/").lower())
+    return {fingerprint for fingerprint in fingerprints if fingerprint}
+
+
+def find_duplicate_source(db: Session, urls: list[str | None]) -> ExternalSource | None:
+    wanted = set()
+    for url in urls:
+        wanted.update(url_fingerprints(url))
+    if not wanted:
+        return None
+    sources = db.scalars(select(ExternalSource))
+    for source in sources:
+        existing = url_fingerprints(source.feed_url) | url_fingerprints(source.site_url)
+        if wanted & existing:
+            return source
+    return None
 
 
 def detect_source(url: str, fetch_sample_items: bool = True) -> dict:
@@ -75,8 +113,14 @@ def _candidate_from_parsed(parsed: dict, feed_url: str, include_items: bool, war
 
 
 def create_source(db: Session, payload) -> ExternalSource:
+    duplicate = find_duplicate_source(db, [str(payload.feed_url)])
+    if duplicate:
+        raise FeedError(f"This source already exists as {duplicate.name}.")
     detected = detect_source(str(payload.feed_url), fetch_sample_items=True)
     best = detected["candidates"][0]
+    duplicate = find_duplicate_source(db, [str(payload.feed_url), best.get("feed_url"), best.get("site_url")])
+    if duplicate:
+        raise FeedError(f"This source already exists as {duplicate.name}.")
     source = ExternalSource(
         name=payload.name or best.get("title") or str(payload.feed_url),
         feed_url=best["feed_url"],
@@ -98,6 +142,80 @@ def create_source(db: Session, payload) -> ExternalSource:
         raise FeedError("This feed URL already exists as a source.") from exc
     db.refresh(source)
     return source
+
+
+def bulk_create_sources(db: Session, payloads) -> dict:
+    existing_sources = list(db.scalars(select(ExternalSource)))
+    fingerprint_index = set()
+    for source in existing_sources:
+        fingerprint_index.update(url_fingerprints(source.feed_url))
+        fingerprint_index.update(url_fingerprints(source.site_url))
+
+    added = 0
+    skipped = 0
+    failed = 0
+    items = []
+    for payload in payloads:
+        feed_url = str(payload.feed_url)
+        fingerprints = url_fingerprints(feed_url)
+        if fingerprints & fingerprint_index:
+            skipped += 1
+            items.append({"feed_url": feed_url, "status": "skipped", "message": "Source URL already exists."})
+            continue
+        source = ExternalSource(
+            name=payload.name or feed_url,
+            feed_url=feed_url,
+            fetch_interval_minutes=payload.fetch_interval_minutes,
+            reliability_score=payload.reliability_score,
+            enabled=False,
+            status="unchecked",
+            category_scope=payload.category_scope,
+            country_scope=payload.country_scope,
+            detected_language=payload.language,
+        )
+        try:
+            with db.begin_nested():
+                db.add(source)
+                db.flush()
+            fingerprint_index.update(fingerprints)
+            added += 1
+            items.append({"feed_url": feed_url, "status": "added", "source_id": source.id})
+        except IntegrityError:
+            skipped += 1
+            items.append({"feed_url": feed_url, "status": "skipped", "message": "Source URL already exists."})
+        except Exception as exc:
+            failed += 1
+            items.append({"feed_url": feed_url, "status": "failed", "message": str(exc)})
+    db.commit()
+    return {"added": added, "skipped": skipped, "failed": failed, "items": items}
+
+
+def check_source_health(db: Session, source: ExternalSource) -> tuple[ExternalSource, bool, str]:
+    try:
+        fetched = safe_fetch(source.feed_url)
+        parsed = parse_feed_bytes(fetched.body, fetched.url)
+        source.status = "active"
+        source.enabled = True
+        source.last_error = None
+        source.last_success_at = datetime.now(timezone.utc)
+        source.etag = fetched.etag
+        source.last_modified = fetched.last_modified
+        source.detected_feed_type = parsed.get("feed_type")
+        source.detected_title = source.detected_title or parsed.get("title")
+        source.detected_language = source.detected_language or parsed.get("language")
+        source.site_url = source.site_url or parsed.get("site_url")
+        message = f"RSS ok: parsed {len(parsed.get('items') or [])} item(s)."
+        working = True
+    except Exception as exc:
+        source.status = "failing"
+        source.enabled = False
+        source.last_failure_at = datetime.now(timezone.utc)
+        source.last_error = str(exc)
+        message = str(exc)
+        working = False
+    db.commit()
+    db.refresh(source)
+    return source, working, message
 
 
 def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manual") -> IngestionJob:
@@ -150,23 +268,45 @@ def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manu
 
             title = item.get("title") or "Untitled feed item"
             summary = item.get("summary")
-            text = " ".join(part for part in [title, summary or ""] if part)
-            category_hints = list(dict.fromkeys((item.get("categories") or []) + extract_category_hints(text)))
-            location_hints = extract_location_hints(text)
+            body = summary
+            image_url = item.get("image_url")
+            published_at = item.get("published_at")
+            extraction_status = "rss_only"
+            if item.get("url"):
+                try:
+                    article = extract_article(item["url"])
+                    title = article.title or title
+                    summary = article.summary or summary
+                    body = article.body or body
+                    image_url = article.image_url
+                    published_at = article.published_at or published_at
+                    extraction_status = "article_enriched"
+                except Exception:
+                    extraction_status = "article_fetch_failed"
+            article_text = " ".join(part for part in [title, body or summary or ""] if part)
+            category_hints = list(dict.fromkeys((item.get("categories") or []) + extract_category_hints(article_text)))
+            location_hints = _merge_location_hints(
+                extract_location_hints(article_text),
+                infer_location_candidates(title, body),
+            )
+            location_hints = sanitize_location_hints(location_hints)
             normalized = NormalizedItem(
                 raw_item_id=raw.id,
                 source_id=source.id,
                 canonical_url=item.get("url"),
                 title=title,
                 summary=summary,
-                body=summary,
+                body=body,
                 language=source.detected_language,
-                published_at=item.get("published_at"),
+                image_url=image_url,
+                published_at=published_at,
                 category_hints=category_hints,
                 location_hints=location_hints,
+                extraction_status=extraction_status,
             )
             db.add(normalized)
             db.flush()
+            _store_best_location(db, normalized, location_hints)
             job.normalized_count += 1
 
             candidate = EventCandidate(
@@ -204,6 +344,66 @@ def _risk_hint(categories: list[str]) -> str:
     if "natural_disaster" in categories:
         return "medium"
     return "unknown"
+
+
+def _merge_location_hints(*groups: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for group in groups:
+        for hint in group:
+            name = str(hint.get("name") or "").strip()
+            if not name:
+                continue
+            key = name.lower()
+            current = merged.get(key)
+            confidence = float(hint.get("confidence") or 0.5)
+            if not current or confidence > float(current.get("confidence") or 0):
+                merged[key] = {**hint, "name": name, "confidence": round(confidence, 3)}
+    return sorted(merged.values(), key=lambda hint: float(hint.get("confidence") or 0), reverse=True)[:8]
+
+
+def _store_best_location(db: Session, item: NormalizedItem, hints: list[dict]) -> None:
+    if not hints:
+        return
+    best = dict(hints[0])
+    if best.get("latitude") is None or best.get("longitude") is None:
+        try:
+            geocoded = geocode_location(best["name"])
+        except FeedError:
+            geocoded = None
+        if geocoded:
+            best.update(geocoded)
+            hints[0].update(geocoded)
+            flag_modified(item, "location_hints")
+    if best.get("latitude") is None or best.get("longitude") is None:
+        return
+    location = NormalizedItemLocation(
+        normalized_item_id=item.id,
+        name=best["name"],
+        country_code=best.get("country_code"),
+        latitude=best.get("latitude"),
+        longitude=best.get("longitude"),
+        confidence=best.get("confidence"),
+    )
+    db.add(location)
+    db.flush()
+    if (
+        best.get("latitude") is not None
+        and best.get("longitude") is not None
+        and db.bind is not None
+        and db.bind.dialect.name == "postgresql"
+    ):
+        db.execute(
+            text(
+                "update normalized_item_locations "
+                "set geog = ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography "
+                "where id = :location_id"
+            ),
+            {
+                "longitude": best["longitude"],
+                "latitude": best["latitude"],
+                "location_id": location.id,
+            },
+        )
 
 
 def _jsonable_item(item: dict) -> dict:

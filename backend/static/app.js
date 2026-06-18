@@ -1,10 +1,24 @@
 const state = {
   selectedCandidate: null,
   sources: [],
+  allSources: [],
+  sourceDuplicateIndex: {
+    urls: new Map(),
+    names: new Map(),
+  },
   output: { items: [], events: [] },
   selectedOutputSourceId: "",
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   csvRows: [],
+  csvChecking: false,
+  csvImporting: false,
+  healthChecking: false,
+  healthStopRequested: false,
+  sourcePagination: {
+    offset: 0,
+    limit: 25,
+    total: 0,
+  },
 };
 
 const els = {
@@ -22,6 +36,11 @@ const els = {
   sourceList: document.querySelector("#sourceList"),
   sourceSearch: document.querySelector("#sourceSearch"),
   sourceStatus: document.querySelector("#sourceStatus"),
+  sourcePageSize: document.querySelector("#sourcePageSize"),
+  sourceSummary: document.querySelector("#sourceSummary"),
+  sourceHealthProgress: document.querySelector("#sourceHealthProgress"),
+  prevSources: document.querySelector("#prevSources"),
+  nextSources: document.querySelector("#nextSources"),
   outputSource: document.querySelector("#outputSource"),
   outputPreview: document.querySelector("#outputPreview"),
   outputSummary: document.querySelector("#outputSummary"),
@@ -29,6 +48,9 @@ const els = {
   timeZoneStatus: document.querySelector("#timeZoneStatus"),
   messageBar: document.querySelector("#messageBar"),
   refreshSources: document.querySelector("#refreshSources"),
+  healthCheckScope: document.querySelector("#healthCheckScope"),
+  checkSourceHealth: document.querySelector("#checkSourceHealth"),
+  stopSourceHealth: document.querySelector("#stopSourceHealth"),
   refreshOutput: document.querySelector("#refreshOutput"),
   copyOutput: document.querySelector("#copyOutput"),
   csvFile: document.querySelector("#csvFile"),
@@ -36,8 +58,20 @@ const els = {
   selectAllCsv: document.querySelector("#selectAllCsv"),
   clearCsv: document.querySelector("#clearCsv"),
   importCsv: document.querySelector("#importCsv"),
+  exportImportStatus: document.querySelector("#exportImportStatus"),
   csvSummary: document.querySelector("#csvSummary"),
   csvPreview: document.querySelector("#csvPreview"),
+  csvImportProgress: document.querySelector("#csvImportProgress"),
+  csvImportStatus: document.querySelector("#csvImportStatus"),
+  csvImportPercent: document.querySelector("#csvImportPercent"),
+  csvImportFill: document.querySelector("#csvImportFill"),
+  sourceHealthSummary: document.querySelector("#sourceHealthSummary"),
+  sourceHealthPercent: document.querySelector("#sourceHealthPercent"),
+  sourceHealthFill: document.querySelector("#sourceHealthFill"),
+  sourceHealthChecked: document.querySelector("#sourceHealthChecked"),
+  sourceHealthWorking: document.querySelector("#sourceHealthWorking"),
+  sourceHealthFailing: document.querySelector("#sourceHealthFailing"),
+  sourceHealthRemaining: document.querySelector("#sourceHealthRemaining"),
 };
 
 const savedKey = localStorage.getItem("geoAtlasAdminKey");
@@ -265,16 +299,95 @@ els.clearForm.addEventListener("click", () => {
   els.saveSource.disabled = true;
 });
 
-async function loadSources() {
+function sourceQueryParams({ offset = state.sourcePagination.offset, limit = state.sourcePagination.limit, includeArchived = true, useFilters = true } = {}) {
+  const params = new URLSearchParams({
+    include_archived: String(includeArchived),
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (useFilters) {
+    const query = els.sourceSearch.value.trim();
+    const status = els.sourceStatus.value;
+    if (query) params.set("q", query);
+    if (status !== "all") params.set("status", status);
+  }
+  return params;
+}
+
+async function fetchSourcesPage(options = {}) {
+  const response = await fetch(`/api/v1/sources?${sourceQueryParams(options)}`, { headers: adminHeaders() });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.detail || `Request failed with ${response.status}`);
+  }
+  return {
+    sources: body,
+    total: Number(response.headers.get("X-Total-Count") || body.length || 0),
+  };
+}
+
+async function loadSourceIndex() {
+  if (!els.adminKey.value.trim()) return;
+  const limit = 200;
+  let offset = 0;
+  let total = Infinity;
+  const sources = [];
+  while (offset < total) {
+    const page = await fetchSourcesPage({ offset, limit, includeArchived: true, useFilters: false });
+    sources.push(...page.sources);
+    total = page.total;
+    if (!page.sources.length) break;
+    offset += page.sources.length;
+  }
+  state.allSources = sources;
+  rebuildSourceDuplicateIndex();
+  updateOutputSourceOptions();
+}
+
+function updateIndexedSource(updatedSource) {
+  state.sources = state.sources.map((source) => source.id === updatedSource.id ? updatedSource : source);
+  state.allSources = state.allSources.map((source) => source.id === updatedSource.id ? updatedSource : source);
+}
+
+function setHealthProgress({ checked = 0, total = 0, working = 0, failing = 0, label = "", done = false } = {}) {
+  els.sourceHealthProgress.hidden = false;
+  const percent = total ? Math.round((checked / total) * 100) : 0;
+  els.sourceHealthFill.style.width = `${percent}%`;
+  els.sourceHealthPercent.textContent = `${percent}%`;
+  els.sourceHealthChecked.textContent = checked;
+  els.sourceHealthWorking.textContent = working;
+  els.sourceHealthFailing.textContent = failing;
+  els.sourceHealthRemaining.textContent = Math.max(0, total - checked);
+  els.sourceHealthSummary.textContent = done
+    ? label || `RSS health: ${working} working, ${failing} not working`
+    : label || `Checking ${checked}/${total}`;
+}
+
+async function loadSources({ keepPage = true } = {}) {
   if (!els.adminKey.value.trim()) {
     els.sourceList.innerHTML = `<div class="empty">Enter a generated admin key to load sources.</div>`;
+    state.sources = [];
+    state.allSources = [];
+    state.sourcePagination.total = 0;
+    renderSourcePager();
+    updateOutputSourceOptions();
     return;
+  }
+  if (!keepPage) {
+    state.sourcePagination.offset = 0;
   }
   els.sourceList.innerHTML = `<div class="empty">Loading sources...</div>`;
   try {
-    state.sources = await api("/api/v1/sources?include_archived=true", { headers: adminHeaders() });
+    const page = await fetchSourcesPage();
+    state.sources = page.sources;
+    state.sourcePagination.total = page.total;
+    if (state.sourcePagination.offset >= page.total && page.total > 0) {
+      state.sourcePagination.offset = Math.max(0, Math.floor((page.total - 1) / state.sourcePagination.limit) * state.sourcePagination.limit);
+      return loadSources({ keepPage: true });
+    }
     renderSources();
-    updateOutputSourceOptions();
+    renderSourcePager();
+    await loadSourceIndex();
   } catch (error) {
     renderPanelError(els.sourceList, error);
     showMessage(error.message, "bad");
@@ -282,35 +395,87 @@ async function loadSources() {
 }
 
 function renderSources() {
-  const query = els.sourceSearch.value.trim().toLowerCase();
-  const status = els.sourceStatus.value;
-  const sources = state.sources.filter((source) => {
-    const haystack = `${source.name} ${source.feed_url} ${source.status}`.toLowerCase();
-    return (!query || haystack.includes(query)) && (status === "all" || source.status === status);
-  });
-  if (!sources.length) {
+  if (!state.sources.length) {
     els.sourceList.innerHTML = `<div class="empty">No matching sources.</div>`;
     return;
   }
-  els.sourceList.innerHTML = sources.map(renderSource).join("");
+  els.sourceList.innerHTML = state.sources.map(renderSource).join("");
+}
+
+function renderSourcePager() {
+  const { offset, limit, total } = state.sourcePagination;
+  if (!total) {
+    els.sourceSummary.textContent = "0 sources";
+    els.prevSources.disabled = true;
+    els.nextSources.disabled = true;
+    return;
+  }
+  const start = offset + 1;
+  const end = Math.min(offset + state.sources.length, total);
+  const page = Math.floor(offset / limit) + 1;
+  const pages = Math.max(1, Math.ceil(total / limit));
+  els.sourceSummary.textContent = `Showing ${start}-${end} of ${total} sources | Page ${page} of ${pages}`;
+  els.prevSources.disabled = offset === 0;
+  els.nextSources.disabled = offset + limit >= total;
 }
 
 function renderSource(source) {
+  const isChecking = source.healthCheckStatus === "checking";
+  const isWorking = source.enabled && !source.archived && source.status === "active";
+  const isArchived = source.archived || source.status === "archived";
+  const isUnchecked = !isArchived && source.status === "unchecked";
+  const healthClass = isChecking ? "checking" : isArchived ? "archived" : isWorking ? "working" : isUnchecked ? "unchecked" : "broken";
+  const healthLabel = isChecking ? "Checking" : isArchived ? "Archived" : isWorking ? "Working" : isUnchecked ? "Unchecked" : "Not working";
+  const healthNote = isChecking
+    ? "Testing RSS response and feed format"
+    : isArchived
+    ? "Stored as archived and hidden from public output"
+    : isWorking
+      ? "Visible in public output"
+      : isUnchecked
+        ? "Waiting for RSS health check"
+        : "Hidden from public output";
+  const statusClass = isWorking ? "good" : isArchived ? "bad" : "warn";
   return `
-    <article class="source-card" data-source-id="${source.id}">
-      <header>
-        <div>
-          <h3>${escapeHtml(source.name)}</h3>
-          <p class="meta">${escapeHtml(source.feed_url)}</p>
+    <article class="source-card source-${healthClass}" data-source-id="${source.id}">
+      <div class="source-main">
+        <div class="source-info">
+          <div class="source-title-row">
+            <h3>${escapeHtml(source.name)}</h3>
+            <span class="pill ${statusClass}">${escapeHtml(source.status)}</span>
+          </div>
+          <a class="source-url" href="${escapeHtml(source.feed_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.feed_url)}</a>
+          <div class="source-metrics">
+            <span>Last success: ${escapeHtml(formatDate(source.last_success_at))}</span>
+            <span>Reliability: ${source.reliability_score}</span>
+          </div>
+          ${source.last_error ? `<p class="source-error">Last error: ${escapeHtml(source.last_error)}</p>` : ""}
         </div>
-        <span class="pill ${source.status === "active" ? "good" : "warn"}">${escapeHtml(source.status)}</span>
-      </header>
-      <p class="meta">Last success: ${escapeHtml(formatDate(source.last_success_at))} | Reliability: ${source.reliability_score}</p>
-      ${source.last_error ? `<p class="meta">Last error: ${escapeHtml(source.last_error)}</p>` : ""}
-      <div class="controls">
-        <button type="button" data-action="ingest">Run ingest</button>
-        <button type="button" data-action="view">View output</button>
-        <button type="button" data-action="archive" class="danger">Archive</button>
+        <div class="source-health">
+          <span class="health-dot"></span>
+          <strong>${healthLabel}</strong>
+          <span>${healthNote}</span>
+        </div>
+      </div>
+      <div class="source-actions">
+        <div class="action-group">
+          ${isArchived ? "" : `
+            <button type="button" data-action="ingest">Run ingest</button>
+            <button type="button" data-action="view">View output</button>
+          `}
+        </div>
+        <div class="action-group health-actions">
+          ${isArchived ? "" : `
+            <button type="button" class="status-toggle ${isWorking ? "active" : ""}" data-action="mark-working" ${isWorking ? "disabled" : ""}>Working</button>
+            <button type="button" class="status-toggle ${!isWorking && !isUnchecked ? "active danger-state" : ""}" data-action="mark-broken" ${!isWorking && !isUnchecked ? "disabled" : ""}>Not working</button>
+          `}
+        </div>
+        <div class="action-group danger-actions">
+          ${isArchived ? "" : `
+          <button type="button" data-action="archive" class="danger">Archive</button>
+          `}
+          <button type="button" data-action="purge" class="danger">Remove from DB</button>
+        </div>
       </div>
     </article>
   `;
@@ -335,11 +500,36 @@ els.sourceList.addEventListener("click", async (event) => {
       selectOutputSource(sourceId);
       await loadOutput(sourceId);
     }
+    if (button.dataset.action === "mark-working" || button.dataset.action === "mark-broken") {
+      const working = button.dataset.action === "mark-working";
+      const done = setBusy(button, working ? "Marking..." : "Hiding...");
+      const source = await api(`/api/v1/sources/${sourceId}/mark`, {
+        method: "POST",
+        headers: adminHeaders(),
+        body: JSON.stringify({ working }),
+      });
+      done();
+      showMessage(`${source.name} marked ${working ? "working" : "not working"}.`);
+      await loadSources();
+      await loadOutput(state.selectedOutputSourceId);
+    }
     if (button.dataset.action === "archive") {
       const done = setBusy(button, "Archiving...");
       await api(`/api/v1/sources/${sourceId}`, { method: "DELETE", headers: adminHeaders() });
       done();
       showMessage("Source archived.");
+      if (state.selectedOutputSourceId === sourceId) {
+        selectOutputSource("");
+      }
+      await loadSources();
+      await loadOutput(state.selectedOutputSourceId);
+    }
+    if (button.dataset.action === "purge") {
+      if (!window.confirm("Remove this source and its collected items from the database? This cannot be undone.")) return;
+      const done = setBusy(button, "Removing...");
+      const result = await api(`/api/v1/sources/${sourceId}/purge`, { method: "DELETE", headers: adminHeaders() });
+      done();
+      showMessage(`Removed source and ${result.deleted_normalized_items} public item${result.deleted_normalized_items === 1 ? "" : "s"} from the database.`);
       if (state.selectedOutputSourceId === sourceId) {
         selectOutputSource("");
       }
@@ -354,7 +544,8 @@ els.sourceList.addEventListener("click", async (event) => {
 
 function updateOutputSourceOptions() {
   const current = state.selectedOutputSourceId;
-  els.outputSource.innerHTML = `<option value="">All sources</option>` + state.sources
+  const sources = state.allSources.length ? state.allSources : state.sources;
+  els.outputSource.innerHTML = `<option value="">All sources</option>` + sources
     .map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(source.name)}</option>`)
     .join("");
   els.outputSource.value = current;
@@ -365,8 +556,70 @@ function selectOutputSource(sourceId) {
   els.outputSource.value = state.selectedOutputSourceId;
 }
 
+function csvCell(value) {
+  const text = String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
 function normalizeUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function urlFingerprints(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const fingerprints = new Set([normalizeUrl(raw)]);
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const path = parsed.pathname.replace(/\/+$/, "") || "/";
+    const query = parsed.searchParams.toString();
+    fingerprints.add(`${host}${path}${query ? `?${query}` : ""}`);
+    fingerprints.add(`${host}${path}`);
+    fingerprints.add(`${host}${path.replace(/\/(feed\/atom|rss\.xml|feed\.xml|feed|rss|atom)$/i, "") || "/"}`);
+  } catch {
+    fingerprints.add(normalizeUrl(raw.replace(/^https?:\/\//i, "").replace(/^www\./i, "")));
+  }
+  return [...fingerprints].filter(Boolean);
+}
+
+function sourceFingerprints(source) {
+  return [
+    ...urlFingerprints(source.feed_url),
+    ...urlFingerprints(source.site_url),
+  ];
+}
+
+function rebuildSourceDuplicateIndex() {
+  const urls = new Map();
+  const names = new Map();
+  state.allSources.forEach((source) => {
+    sourceFingerprints(source).forEach((fingerprint) => {
+      if (!urls.has(fingerprint)) urls.set(fingerprint, source);
+    });
+    const normalizedName = normalizeSourceName(source.name);
+    if (normalizedName && !names.has(normalizedName)) names.set(normalizedName, source);
+  });
+  state.sourceDuplicateIndex = { urls, names };
+}
+
+function normalizeSourceName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function findDuplicateSource(baseUrl, sourceName = "") {
+  const urlMatch = urlFingerprints(baseUrl)
+    .map((fingerprint) => state.sourceDuplicateIndex.urls.get(fingerprint))
+    .find(Boolean);
+  if (urlMatch) return { source: urlMatch, matchedBy: "stored-url" };
+  const normalizedName = normalizeSourceName(sourceName);
+  if (!normalizedName) return null;
+  const nameMatch = state.sourceDuplicateIndex.names.get(normalizedName);
+  return nameMatch ? { source: nameMatch, matchedBy: "source-name" } : null;
 }
 
 function splitCsvLine(line) {
@@ -421,7 +674,6 @@ function normalizeCsvRecord(record, lineNumber) {
     .flatMap((part) => part.split(","))
     .map((value) => value.trim())
     .filter(Boolean);
-  const duplicate = state.sources.find((source) => normalizeUrl(source.feed_url) === normalizeUrl(baseUrl));
   const errors = [];
   if (!record["source name"]?.trim()) errors.push("source name missing");
   if (!baseUrl) errors.push("base url missing");
@@ -434,8 +686,11 @@ function normalizeCsvRecord(record, lineNumber) {
     id: crypto.randomUUID(),
     lineNumber,
     selected: errors.length === 0,
-    duplicateId: duplicate?.id || null,
-    duplicateName: duplicate?.name || null,
+    duplicateId: null,
+    duplicateName: null,
+    duplicateMatch: null,
+    importStatus: "ready",
+    importMessage: "",
     errors,
     sourceName: record["source name"]?.trim() || "",
     baseUrl,
@@ -452,24 +707,79 @@ async function handleCsvFile(file) {
     els.csvFile.value = "";
     return;
   }
-  if (!state.sources.length) {
-    await loadSources();
-  }
   try {
+    state.csvImporting = false;
+    els.csvImportProgress.hidden = true;
+    els.csvImportFill.style.width = "0%";
+    els.csvImportPercent.textContent = "0%";
     state.csvRows = parseCsv(await file.text());
     renderCsvPreview();
-    showMessage(`Loaded ${state.csvRows.length} CSV row${state.csvRows.length === 1 ? "" : "s"}.`);
+    showMessage(`Loaded ${state.csvRows.length} CSV row${state.csvRows.length === 1 ? "" : "s"}. Existing database links will be skipped during import.`);
   } catch (error) {
+    state.csvChecking = false;
     state.csvRows = [];
     renderCsvPreview();
     showMessage(error.message, "bad");
   }
 }
 
+function showCsvLoadMessage(prefix = "") {
+  const storedCount = state.csvRows.filter((row) => row.duplicateId).length;
+  const selectableCount = selectedCsvRows().length;
+  const base = `Loaded ${state.csvRows.length} CSV row${state.csvRows.length === 1 ? "" : "s"}: ${storedCount} already in DB, ${selectableCount} selected for add.`;
+  showMessage(prefix ? `${prefix} ${base}` : base);
+}
+
+function csvImportStatusLabel(row) {
+  if (row.importStatus === "added") return "Added";
+  if (row.importStatus === "skipped" || row.duplicateMatch === "database") return "Skipped duplicate";
+  if (row.importStatus === "failed") return "Failed";
+  if (row.errors.length) return "Invalid";
+  if (row.importStatus === "adding") return "Adding";
+  return row.selected ? "Ready" : "Not selected";
+}
+
+function exportImportStatusCsv() {
+  if (!state.csvRows.length) return;
+  const headers = [
+    "line",
+    "source name",
+    "base url",
+    "category",
+    "region",
+    "language",
+    "import status",
+    "message",
+  ];
+  const rows = state.csvRows.map((row) => [
+    row.lineNumber,
+    row.sourceName,
+    row.baseUrl,
+    row.category.join("|"),
+    row.region,
+    row.language,
+    csvImportStatusLabel(row),
+    row.importMessage || row.errors.join(", "),
+  ]);
+  const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const date = new Date().toISOString().slice(0, 10);
+  link.href = url;
+  link.download = `geoatlas-import-status-${date}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showMessage(`Exported import status for ${state.csvRows.length} row${state.csvRows.length === 1 ? "" : "s"}.`);
+}
+
 function renderCsvPreview() {
-  els.selectAllCsv.disabled = state.csvRows.length === 0;
-  els.clearCsv.disabled = state.csvRows.length === 0;
-  els.importCsv.disabled = selectedCsvRows().length === 0;
+  els.selectAllCsv.disabled = state.csvImporting || state.csvRows.length === 0;
+  els.clearCsv.disabled = state.csvImporting || state.csvRows.length === 0;
+  els.importCsv.disabled = state.csvImporting || state.csvChecking || selectedCsvRows().length === 0;
+  els.exportImportStatus.disabled = state.csvRows.length === 0;
   if (!state.csvRows.length) {
     els.csvSummary.textContent = "No CSV loaded.";
     els.csvPreview.className = "csv-preview empty";
@@ -477,9 +787,13 @@ function renderCsvPreview() {
     return;
   }
   const selected = selectedCsvRows().length;
-  const duplicates = state.csvRows.filter((row) => row.duplicateId).length;
+  const duplicates = state.csvRows.filter((row) => row.duplicateId || row.duplicateMatch === "database").length;
   const invalid = state.csvRows.filter((row) => row.errors.length).length;
-  els.csvSummary.textContent = `${selected}/${state.csvRows.length} selected, ${duplicates} duplicate, ${invalid} invalid`;
+  const added = state.csvRows.filter((row) => row.importStatus === "added").length;
+  const skipped = state.csvRows.filter((row) => row.importStatus === "skipped").length;
+  const failed = state.csvRows.filter((row) => row.importStatus === "failed").length;
+  const results = added || skipped || failed ? `, ${added} added, ${skipped} skipped, ${failed} failed` : "";
+  els.csvSummary.textContent = `${selected}/${state.csvRows.length} selected, ${duplicates} duplicates, ${invalid} invalid${results}${state.csvChecking ? ", checking..." : ""}`;
   els.csvPreview.className = "csv-preview";
   els.csvPreview.innerHTML = `
     <table class="csv-table">
@@ -503,11 +817,21 @@ function renderCsvPreview() {
 
 function renderCsvRow(row) {
   const disabled = row.errors.length ? "disabled" : "";
-  const status = row.errors.length
+  const status = row.importStatus === "adding"
+    ? `<span class="pill warn">Adding</span>`
+    : row.importStatus === "added"
+      ? `<span class="pill good">Added</span>`
+      : row.importStatus === "skipped"
+        ? `<span class="pill warn">Skipped duplicate</span>`
+        : row.importStatus === "failed"
+          ? `<span class="pill bad">Failed: ${escapeHtml(row.importMessage || row.errors.join(", "))}</span>`
+          : row.errors.length
     ? `<span class="pill bad">${escapeHtml(row.errors.join(", "))}</span>`
-    : row.duplicateId
-      ? `<span class="pill warn">Duplicate: ${escapeHtml(row.duplicateName)}</span>`
-      : `<span class="pill good">New</span>`;
+    : row.duplicateMatch === "database"
+      ? `<span class="pill warn">Skipped duplicate</span>`
+      : row.duplicateId
+      ? `<span class="pill warn">Already in DB${row.duplicateMatch === "source-name" ? " by source name" : row.duplicateMatch === "detected-feed" ? " via feed detection" : ""}: ${escapeHtml(row.duplicateName)}</span>`
+      : `<span class="pill">Ready</span>`;
   return `
     <tr class="${row.selected ? "" : "skip-row"}" data-row-id="${row.id}">
       <td><input type="checkbox" ${row.selected ? "checked" : ""} ${disabled} aria-label="Select row ${row.lineNumber}" /></td>
@@ -519,6 +843,16 @@ function renderCsvRow(row) {
       <td>${status}</td>
     </tr>
   `;
+}
+
+function updateCsvImportProgress({ completed, total, added, skipped, failed, current = "", done = false }) {
+  els.csvImportProgress.hidden = false;
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  els.csvImportFill.style.width = `${percent}%`;
+  els.csvImportPercent.textContent = `${percent}%`;
+  els.csvImportStatus.textContent = done
+    ? `Complete: ${added} added, ${skipped} skipped, ${failed} failed`
+    : `${completed}/${total} processed${current ? ` - ${current}` : ""}`;
 }
 
 function selectedCsvRows() {
@@ -542,48 +876,81 @@ async function importCsvRows() {
   const rows = selectedCsvRows();
   if (!rows.length) return;
   const done = setBusy(els.importCsv, "Importing...");
-  const mode = els.duplicateMode.value;
+  state.csvImporting = true;
+  renderCsvPreview();
   let added = 0;
-  let overridden = 0;
   let skipped = 0;
   let failed = 0;
-  for (const row of rows) {
+  let completed = 0;
+  const batchSize = 250;
+  updateCsvImportProgress({ completed, total: rows.length, added, skipped, failed });
+  for (let index = 0; index < rows.length; index += batchSize) {
+    const batch = rows.slice(index, index + batchSize);
+    batch.forEach((row) => {
+      row.importStatus = "adding";
+      row.importMessage = "";
+    });
+    updateCsvImportProgress({
+      completed,
+      total: rows.length,
+      added,
+      skipped,
+      failed,
+      current: `Adding rows ${index + 1}-${Math.min(index + batch.length, rows.length)}`,
+    });
+    renderCsvPreview();
     try {
-      if (row.duplicateId) {
-        if (mode === "skip") {
-          skipped += 1;
-          continue;
-        }
-        await api(`/api/v1/sources/${row.duplicateId}`, {
-          method: "PATCH",
-          headers: adminHeaders(),
-          body: JSON.stringify({
-            name: row.sourceName,
-            category_scope: row.category.length ? row.category : null,
-            country_scope: row.region || null,
-            detected_language: row.language || null,
-            enabled: true,
-          }),
-        });
-        overridden += 1;
-        continue;
-      }
-      await api("/api/v1/sources/rss", {
+      const result = await api("/api/v1/sources/import", {
         method: "POST",
         headers: adminHeaders(),
-        body: JSON.stringify(csvPayload(row)),
+        body: JSON.stringify({ sources: batch.map(csvPayload) }),
       });
-      added += 1;
+      result.items.forEach((item, itemIndex) => {
+        const row = batch[itemIndex];
+        if (!row) return;
+        row.selected = false;
+        row.importMessage = item.message || "";
+        if (item.status === "added") {
+          added += 1;
+          row.importStatus = "added";
+        } else if (item.status === "skipped") {
+          skipped += 1;
+          row.importStatus = "skipped";
+          row.duplicateName = "Existing source";
+          row.duplicateMatch = "database";
+        } else {
+          failed += 1;
+          row.importStatus = "failed";
+          row.errors = [item.message || "Import failed."];
+        }
+      });
     } catch (error) {
-      failed += 1;
-      row.errors = [error.message];
-      row.selected = false;
+      batch.forEach((row) => {
+        failed += 1;
+        row.errors = [error.message];
+        row.importStatus = "failed";
+        row.importMessage = error.message;
+        row.selected = false;
+      });
     }
+    completed += batch.length;
+    updateCsvImportProgress({
+      completed,
+      total: rows.length,
+      added,
+      skipped,
+      failed,
+      current: `Processed ${completed} rows`,
+    });
+    renderCsvPreview();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
   }
   done();
+  state.csvImporting = false;
   await loadSources();
   renderCsvPreview();
-  showMessage(`CSV import finished: ${added} added, ${overridden} overridden, ${skipped} skipped, ${failed} failed.`, failed ? "bad" : "good");
+  updateCsvImportProgress({ completed, total: rows.length, added, skipped, failed, done: true });
+  showMessage(`CSV import finished: ${added} added, ${skipped} duplicates skipped, ${failed} failed.`, failed ? "bad" : "good");
 }
 
 async function loadOutput(sourceId = state.selectedOutputSourceId) {
@@ -599,21 +966,43 @@ async function loadOutput(sourceId = state.selectedOutputSourceId) {
   }
 }
 
-els.sourceSearch.addEventListener("input", renderSources);
-els.sourceStatus.addEventListener("change", renderSources);
+let sourceSearchTimer;
+
+els.sourceSearch.addEventListener("input", () => {
+  window.clearTimeout(sourceSearchTimer);
+  sourceSearchTimer = window.setTimeout(() => loadSources({ keepPage: false }), 250);
+});
+els.sourceStatus.addEventListener("change", () => loadSources({ keepPage: false }));
+els.sourcePageSize.addEventListener("change", () => {
+  state.sourcePagination.limit = Number(els.sourcePageSize.value || 25);
+  loadSources({ keepPage: false });
+});
+els.prevSources.addEventListener("click", () => {
+  state.sourcePagination.offset = Math.max(0, state.sourcePagination.offset - state.sourcePagination.limit);
+  loadSources({ keepPage: true });
+});
+els.nextSources.addEventListener("click", () => {
+  state.sourcePagination.offset += state.sourcePagination.limit;
+  loadSources({ keepPage: true });
+});
 els.outputSource.addEventListener("change", async () => {
   selectOutputSource(els.outputSource.value);
   await loadOutput(state.selectedOutputSourceId);
 });
 els.refreshSources.addEventListener("click", loadSources);
+els.checkSourceHealth.addEventListener("click", checkAllSourceHealth);
+els.stopSourceHealth.addEventListener("click", () => {
+  state.healthStopRequested = true;
+  els.stopSourceHealth.disabled = true;
+  els.sourceHealthSummary.textContent = "Stopping after current checks finish...";
+});
 els.refreshOutput.addEventListener("click", () => loadOutput());
 els.copyOutput.addEventListener("click", async () => {
   await navigator.clipboard.writeText(els.outputPreview.textContent);
   showMessage("Output JSON copied.");
 });
-els.adminKey.addEventListener("change", loadSources);
+els.adminKey.addEventListener("change", () => loadSources({ keepPage: false }));
 els.csvFile.addEventListener("change", (event) => handleCsvFile(event.target.files[0]));
-els.duplicateMode.addEventListener("change", renderCsvPreview);
 els.csvPreview.addEventListener("change", (event) => {
   const checkbox = event.target.closest('input[type="checkbox"]');
   const rowEl = event.target.closest("[data-row-id]");
@@ -633,12 +1022,127 @@ els.selectAllCsv.addEventListener("click", () => {
   renderCsvPreview();
 });
 els.clearCsv.addEventListener("click", () => {
+  state.csvImporting = false;
   state.csvRows = [];
   els.csvFile.value = "";
   els.selectAllCsv.textContent = "Select all";
+  els.csvImportProgress.hidden = true;
+  els.csvImportFill.style.width = "0%";
+  els.csvImportPercent.textContent = "0%";
   renderCsvPreview();
 });
 els.importCsv.addEventListener("click", importCsvRows);
+els.exportImportStatus.addEventListener("click", exportImportStatusCsv);
+
+async function checkAllSourceHealth() {
+  if (!els.adminKey.value.trim()) {
+    showMessage("Enter the generated admin key before checking RSS health.", "bad");
+    return;
+  }
+  if (state.healthChecking) return;
+  state.healthChecking = true;
+  state.healthStopRequested = false;
+  const done = setBusy(els.checkSourceHealth, "Checking...");
+  els.stopSourceHealth.disabled = false;
+  els.healthCheckScope.disabled = true;
+  setHealthProgress({ label: "Loading sources..." });
+  let checked = 0;
+  let working = 0;
+  let failing = 0;
+  try {
+    await loadSourceIndex();
+    const scope = els.healthCheckScope.value;
+    const sources = state.allSources
+      .filter((source) => !source.archived && (scope === "all" || source.status === "unchecked"))
+      .sort((left, right) => Number(right.status === "unchecked") - Number(left.status === "unchecked"));
+    if (!sources.length) {
+      setHealthProgress({ label: scope === "unchecked" ? "No unchecked sources to clean." : "No active sources to check.", done: true });
+      return;
+    }
+    const concurrency = 6;
+    let nextIndex = 0;
+    let activeName = "";
+    showMessage(`Cleaning ${sources.length} RSS source${sources.length === 1 ? "" : "s"}...`);
+
+    const checkNext = async () => {
+      while (!state.healthStopRequested) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= sources.length) return;
+        const source = sources[index];
+        activeName = source.name;
+        source.healthCheckStatus = "checking";
+        const visibleSource = state.sources.find((item) => item.id === source.id);
+        if (visibleSource) visibleSource.healthCheckStatus = "checking";
+        renderSources();
+        setHealthProgress({
+          checked,
+          total: sources.length,
+          working,
+          failing,
+          label: `Checking ${Math.min(checked + 1, sources.length)}/${sources.length}: ${source.name}`,
+        });
+        try {
+          const result = await api(`/api/v1/sources/${source.id}/check-health`, {
+            method: "POST",
+            headers: adminHeaders(),
+          });
+          result.source.healthCheckStatus = result.working ? "working" : "failing";
+          updateIndexedSource(result.source);
+          if (result.working) {
+            working += 1;
+          } else {
+            failing += 1;
+          }
+        } catch (error) {
+          failing += 1;
+          source.healthCheckStatus = "failing";
+          source.last_error = error.message;
+          const failedVisibleSource = state.sources.find((item) => item.id === source.id);
+          if (failedVisibleSource) {
+            failedVisibleSource.healthCheckStatus = "failing";
+            failedVisibleSource.last_error = error.message;
+          }
+        }
+        checked += 1;
+        setHealthProgress({
+          checked,
+          total: sources.length,
+          working,
+          failing,
+          label: `Cleaning RSS sources${activeName ? ` - ${activeName}` : ""}`,
+        });
+        renderSources();
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, sources.length) }, () => checkNext()));
+    if (state.healthStopRequested) {
+      setHealthProgress({
+        checked,
+        total: sources.length,
+        working,
+        failing,
+        label: `Stopped: ${checked}/${sources.length} checked`,
+      });
+      showMessage(`RSS cleaning stopped: ${checked}/${sources.length} checked.`, "bad");
+    } else {
+      setHealthProgress({ checked, total: sources.length, working, failing, done: true });
+      showMessage(`RSS cleaning complete: ${working} working, ${failing} not working.`);
+    }
+    await loadSources({ keepPage: true });
+    await loadOutput(state.selectedOutputSourceId);
+  } catch (error) {
+    setHealthProgress({ checked, total: checked || 1, working, failing, label: "RSS health check failed." });
+    showMessage(error.message, "bad");
+  } finally {
+    state.healthChecking = false;
+    state.healthStopRequested = false;
+    els.stopSourceHealth.disabled = true;
+    els.healthCheckScope.disabled = false;
+    done();
+  }
+}
 
 checkHealth();
 loadSources();
