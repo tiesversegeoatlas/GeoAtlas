@@ -40,6 +40,37 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Lillyasmi Frontend Integration
+
+**Developer:** Codex
+
+**Goal:** Bring the `lillyasmi` branch frontend into current `main` and connect it to the existing GeoAtlas backend without regressing ingestion.
+
+**What changed:**
+- `frontend/`: Imported the maintainable Next.js source and configuration from `origin/lillyasmi`; generated `.next` output was deliberately excluded.
+- `frontend/next.config.ts`, `frontend/.env.example`: Added a same-origin proxy to the standalone FastAPI backend through `GEOATLAS_API_URL`.
+- `frontend/src/lib/geoatlas-api.ts`, `frontend/src/stores/eventStore.ts`: Replaced mock events with typed loading from public item and item-detail endpoints.
+- Feed, map, event details, homepage alerts, statistics, hotspots, dashboard charts, sidebar operations, images, locations, and source links now use collected backend data.
+- `frontend/src/app/admin/page.tsx`: Removed the non-persistent fake event form and linked the frontend to the real source collection console and OpenAPI docs.
+- Fixed the branch's landing-page prerender crash caused by rendering a sidebar trigger outside its provider.
+- `.gitignore`: Excludes frontend dependencies, local environment, and Next.js build output.
+
+**How to run or verify:**
+- Start FastAPI on `127.0.0.1:8000`.
+- Run `npm install` and `npm run dev` from `frontend`.
+- Open `http://127.0.0.1:3000/feed`, `/map`, `/dashboard`, and an event detail page.
+- Run `npm run build` from `frontend` and `python -m pytest -q` from `backend`.
+
+**Output or result:**
+- The feed displays 100 real collected articles with source, image, category, location, and confidence data.
+- Event detail pages retrieve the selected item from FastAPI.
+- The map displays only events with resolved coordinates.
+- The production frontend build and all backend tests pass.
+
+**Known issues or follow-ups:**
+- Login and registration screens remain visual placeholders because the current standalone collection backend does not expose user-authentication endpoints.
+- The frontend infers display risk from collected categories until a public item response includes a persisted risk field.
+
 ### 2026-06-20 - Do Not Refetch Collected Articles
 
 **Developer:** Codex

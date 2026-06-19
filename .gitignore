@@ -7,3 +7,6 @@ geoatlas_local.db
 backend/geoatlas_local.db
 *.sqlite
 *.sqlite3
+frontend/.next/
+frontend/node_modules/
+frontend/.env.local
