@@ -44,12 +44,24 @@ Use this format:
 
 **Developer:** Codex
 
-**Goal:** Prevent manual RSS ingestion from making the local PC unresponsive.
+**Goal:** Preserve article enrichment, geocoding, and collected output without making the local PC unresponsive.
 
 **What changed:**
 - `backend/app/services.py`: Replaced one duplicate query per feed item with one batch query and capped each run at 25 new items by default.
-- `backend/app/config.py`, `backend/.env.example`: Made article-page enrichment and external geocoding opt-in, with separate article timeout and response-size limits.
-- `backend/app/feed_utils.py`, `backend/app/article_utils.py`: Added lightweight fetch limits for optional article enrichment.
+- `backend/app/ingestion_runner.py`: Added a bounded background executor with one ingestion worker by default.
+- `backend/app/main.py`: Ingest requests now return a queued job immediately, reuse an existing active source job, and resume unfinished jobs after restart.
+- `backend/app/services.py`: Commits small batches and briefly yields between items to keep CPU, disk, and database pressure smooth.
+- `backend/app/config.py`, `backend/.env.example`: Added worker, commit-batch, pause, article timeout, and response-size controls while retaining enrichment and geocoding.
+- `backend/app/feed_utils.py`, `backend/app/article_utils.py`: Added lightweight fetch limits for article enrichment.
+- `backend/static/app.js`: Polls lightweight job status, displays queued/running progress, and avoids rebuilding the full multi-thousand-source index after each ingest.
+- `backend/app/headless_search.py`: Reuses one headless Chrome/Edge instance per ingestion job to search a headline, open the best result, and recover rendered description/body/image data when direct article extraction is blocked or incomplete.
+- `backend/app/services.py`: Feeds headless-search text through the existing conservative location inference and records `search_enriched` or `article_search_enriched` extraction status.
+- `backend/app/services.py`, `backend/scripts/mark_non_feed_urls.py`: Confirmed RSS/Atom parse failures are stored as `connector_type=url`, while temporary HTTP/network failures remain RSS records.
+- `backend/app/headless_search.py`, `backend/app/services.py`: URL sources discover and scrape a bounded set of same-site news articles into the existing raw, normalized, event, image, date, and location fields.
+- `backend/static/app.js`, `backend/static/index.html`: URL records have a separate filter/state and expose `Run scrape` instead of RSS ingestion controls.
+- `backend/app/article_utils.py`: Uses country/state source scope as a low-confidence location fallback only when article-derived location evidence is empty.
+- `backend/app/services.py`, `backend/app/main.py`: Source health now tries RSS/Atom first and, after failure, performs a one-article URL scrape probe before deciding whether the source is usable.
+- `backend/static/app.js`: `Check all sources` includes URL records and reports usable sources whether they work through RSS or scraping.
 - `backend/tests/test_ingestion_performance.py`: Added regression coverage for low-impact defaults.
 
 **How to run or verify:**
@@ -58,11 +70,13 @@ Use this format:
 - Run `python -m unittest discover -s tests -v` from `backend`.
 
 **Output or result:**
-- Default ingest uses RSS content, known-place coordinates, one duplicate lookup, and at most 25 new records.
-- Slow article hosts and Nominatim no longer sit in the default ingestion loop.
+- The UI and API remain responsive while expensive enrichment runs in one background worker.
+- Repeated clicks reuse the same active job instead of starting parallel ingestion.
+- Article enrichment and external geocoding remain enabled by default.
 
 **Known issues or follow-ups:**
-- Set `GEOATLAS_ARTICLE_ENRICHMENT_ENABLED=true` or `GEOATLAS_EXTERNAL_GEOCODING_ENABLED=true` only on a server intended to perform deeper enrichment.
+- The API process must remain running while a background job executes; unfinished jobs are rescheduled on startup.
+- Ingestion/enrichment failure updates the job error but does not change the source's working/visible status; source health is controlled only by the dedicated RSS health workflow.
 
 ### 2026-06-18 - Location False-Positive Cleanup
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -8,7 +10,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.article_utils import extract_article, geocode_location, infer_location_candidates, sanitize_location_hints
+from app.article_utils import (
+    extract_article,
+    geocode_location,
+    infer_location_candidates,
+    sanitize_location_hints,
+    source_scope_location_hint,
+)
 from app.config import get_settings
 from app.feed_utils import (
     FeedError,
@@ -16,10 +24,23 @@ from app.feed_utils import (
     extract_category_hints,
     extract_location_hints,
     item_hash,
+    parse_dt,
     parse_feed_bytes,
     safe_fetch,
 )
+from app.headless_search import HeadlessNewsSearcher
 from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, NormalizedItemLocation, RawFetchedItem
+
+NON_FEED_ERRORS = {
+    "The URL did not return parseable RSS or Atom XML.",
+    "The XML document is not an RSS or Atom feed.",
+    "No RSS or Atom feed was found at this URL.",
+}
+_URL_HEALTH_PROBE_LOCK = threading.Lock()
+
+
+def is_non_feed_error(error: Exception | str) -> bool:
+    return str(error).strip() in NON_FEED_ERRORS
 
 
 def url_fingerprints(value: str | None) -> set[str]:
@@ -191,10 +212,15 @@ def bulk_create_sources(db: Session, payloads) -> dict:
     return {"added": added, "skipped": skipped, "failed": failed, "items": items}
 
 
-def check_source_health(db: Session, source: ExternalSource) -> tuple[ExternalSource, bool, str]:
+def check_source_health(
+    db: Session,
+    source: ExternalSource,
+    searcher: HeadlessNewsSearcher | None = None,
+) -> tuple[ExternalSource, bool, str]:
     try:
         fetched = safe_fetch(source.feed_url)
         parsed = parse_feed_bytes(fetched.body, fetched.url)
+        source.connector_type = "rss"
         source.status = "active"
         source.enabled = True
         source.last_error = None
@@ -207,26 +233,92 @@ def check_source_health(db: Session, source: ExternalSource) -> tuple[ExternalSo
         source.site_url = source.site_url or parsed.get("site_url")
         message = f"RSS ok: parsed {len(parsed.get('items') or [])} item(s)."
         working = True
-    except Exception as exc:
-        source.status = "failing"
-        source.enabled = False
-        source.last_failure_at = datetime.now(timezone.utc)
-        source.last_error = str(exc)
-        message = str(exc)
-        working = False
+    except Exception as rss_error:
+        scrape_result = None
+        scrape_error = None
+        if searcher:
+            probe_urls = list(dict.fromkeys(url for url in [source.site_url, source.feed_url] if url))
+            with _URL_HEALTH_PROBE_LOCK:
+                for probe_url in probe_urls:
+                    try:
+                        scraped = searcher.scrape_source(
+                            probe_url,
+                            get_settings().health_url_probe_articles,
+                        )
+                        if scraped:
+                            scrape_result = scraped
+                            if probe_url != source.feed_url:
+                                source.site_url = probe_url
+                            break
+                    except Exception as exc:
+                        scrape_error = exc
+        if scrape_result:
+            source.connector_type = "url"
+            source.status = "url"
+            source.enabled = True
+            source.detected_feed_type = "url"
+            source.last_error = None
+            source.last_success_at = datetime.now(timezone.utc)
+            message = (
+                f"RSS unavailable ({rss_error}); URL scraping ok: "
+                f"found {len(scrape_result)} article(s)."
+            )
+            working = True
+        else:
+            if not searcher and is_non_feed_error(rss_error):
+                source.connector_type = "url"
+                source.status = "url"
+            else:
+                source.status = "failing"
+            source.enabled = False
+            source.last_failure_at = datetime.now(timezone.utc)
+            source.last_error = str(rss_error)
+            message = str(rss_error)
+            if scrape_error:
+                message += f" URL scraping also failed: {scrape_error}"
+            working = False
     db.commit()
     db.refresh(source)
     return source, working, message
 
 
-def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manual") -> IngestionJob:
-    settings = get_settings()
-    job = IngestionJob(source_id=source.id, trigger_type=trigger_type, status="running", started_at=datetime.now(timezone.utc))
+def create_ingestion_job(db: Session, source: ExternalSource, trigger_type: str = "manual") -> IngestionJob:
+    job = IngestionJob(source_id=source.id, trigger_type=trigger_type, status="queued")
     db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def run_ingestion(
+    db: Session,
+    source: ExternalSource,
+    trigger_type: str = "manual",
+    job: IngestionJob | None = None,
+    searcher: HeadlessNewsSearcher | None = None,
+) -> IngestionJob:
+    settings = get_settings()
+    if job is None:
+        job = IngestionJob(source_id=source.id, trigger_type=trigger_type)
+        db.add(job)
+    job.status = "running"
+    job.started_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(job)
 
     try:
+        if source.connector_type == "url":
+            if not searcher:
+                raise FeedError("URL scraping requires the headless browser worker.")
+            scraped = searcher.scrape_source(source.feed_url, settings.url_scrape_max_articles)
+            _store_url_scrape_results(db, source, job, scraped)
+            job.status = "success"
+            source.status = "url"
+            source.enabled = True
+            source.last_error = None
+            source.last_success_at = datetime.now(timezone.utc)
+            return job
+
         fetched = safe_fetch(source.feed_url, source.etag, source.last_modified)
         if fetched.body == b"":
             job.status = "success"
@@ -281,8 +373,10 @@ def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manu
             body = summary
             image_url = item.get("image_url")
             published_at = item.get("published_at")
+            location_text = None
             extraction_status = "rss_only"
             if settings.article_enrichment_enabled and item.get("url"):
+                searched = None
                 try:
                     article = extract_article(item["url"])
                     title = article.title or title
@@ -293,13 +387,46 @@ def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manu
                     extraction_status = "article_enriched"
                 except Exception:
                     extraction_status = "article_fetch_failed"
-            article_text = " ".join(part for part in [title, body or summary or ""] if part)
+                needs_search = extraction_status == "article_fetch_failed" or not image_url or len(body or "") < 120
+                if searcher and needs_search:
+                    try:
+                        searched = searcher.search(title, item.get("url"))
+                    except Exception:
+                        searched = None
+                if searched:
+                    title = searched.title or title
+                    summary = searched.summary or summary
+                    body = searched.body or body
+                    image_url = searched.image_url or image_url
+                    location_text = searched.location_text
+                    extraction_status = (
+                        "search_enriched"
+                        if extraction_status == "article_fetch_failed"
+                        else "article_search_enriched"
+                    )
+            article_text = " ".join(part for part in [title, location_text or "", body or summary or ""] if part)
             category_hints = list(dict.fromkeys((item.get("categories") or []) + extract_category_hints(article_text)))
             location_hints = _merge_location_hints(
                 extract_location_hints(article_text),
-                infer_location_candidates(title, body),
+                (
+                    [{
+                        "name": location_text,
+                        "confidence": 0.96,
+                        "method": "article_dateline",
+                        "evidence": location_text,
+                    }]
+                    if location_text
+                    else []
+                ),
+                infer_location_candidates(
+                    title,
+                    f"{location_text} -- {body or summary or ''}" if location_text else body,
+                ),
             )
             location_hints = sanitize_location_hints(location_hints)
+            if not location_hints:
+                scope_hint = source_scope_location_hint(source.country_scope)
+                location_hints = [scope_hint] if scope_hint else []
             normalized = NormalizedItem(
                 raw_item_id=raw.id,
                 source_id=source.id,
@@ -330,6 +457,11 @@ def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manu
             )
             db.add(candidate)
             job.event_candidate_count += 1
+            if new_items_processed % settings.ingest_commit_batch_size == 0:
+                db.commit()
+                db.refresh(job)
+            if settings.ingest_item_pause_seconds:
+                time.sleep(settings.ingest_item_pause_seconds)
 
         job.status = "success"
         source.status = "active"
@@ -338,7 +470,6 @@ def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manu
     except Exception as exc:
         job.status = "failed"
         job.error_message = str(exc)
-        source.status = "failing"
         source.last_error = str(exc)
         source.last_failure_at = datetime.now(timezone.utc)
     finally:
@@ -346,6 +477,128 @@ def run_ingestion(db: Session, source: ExternalSource, trigger_type: str = "manu
         db.commit()
         db.refresh(job)
     return job
+
+
+def _store_url_scrape_results(
+    db: Session,
+    source: ExternalSource,
+    job: IngestionJob,
+    scraped: list,
+) -> None:
+    settings = get_settings()
+    items = [
+        {
+            "id": result.url,
+            "url": result.url,
+            "title": result.title,
+            "summary": result.summary,
+            "body": result.body,
+            "image_url": result.image_url,
+            "published_at": parse_dt(result.published_at),
+            "location_text": result.location_text,
+            "categories": [],
+            "raw": {"scrape_method": "headless_url"},
+        }
+        for result in scraped
+        if result.url and result.title
+    ]
+    job.fetched_count = len(items)
+    hashes = [item_hash(item) for item in items]
+    existing_hashes = set(
+        db.scalars(
+            select(RawFetchedItem.content_hash).where(
+                RawFetchedItem.source_id == source.id,
+                RawFetchedItem.content_hash.in_(hashes),
+            )
+        )
+    ) if hashes else set()
+
+    processed = 0
+    for item, content_hash in zip(items, hashes):
+        if content_hash in existing_hashes:
+            job.duplicate_raw_count += 1
+            continue
+        raw = RawFetchedItem(
+            source_id=source.id,
+            job_id=job.id,
+            source_item_id=item["id"],
+            source_url=item["url"],
+            title=item["title"],
+            raw_payload=_jsonable_item(item),
+            content_hash=content_hash,
+            published_at=item["published_at"],
+        )
+        db.add(raw)
+        db.flush()
+
+        article_text = " ".join(
+            part
+            for part in [item["title"], item["location_text"] or "", item["body"] or item["summary"] or ""]
+            if part
+        )
+        category_hints = extract_category_hints(article_text)
+        location_hints = sanitize_location_hints(
+            _merge_location_hints(
+                extract_location_hints(article_text),
+                (
+                    [{
+                        "name": item["location_text"],
+                        "confidence": 0.96,
+                        "method": "article_dateline",
+                        "evidence": item["location_text"],
+                    }]
+                    if item["location_text"]
+                    else []
+                ),
+                infer_location_candidates(
+                    item["title"],
+                    (
+                        f"{item['location_text']} -- {item['body'] or item['summary'] or ''}"
+                        if item["location_text"]
+                        else item["body"] or item["summary"]
+                    ),
+                ),
+            )
+        )
+        if not location_hints:
+            scope_hint = source_scope_location_hint(source.country_scope)
+            location_hints = [scope_hint] if scope_hint else []
+        normalized = NormalizedItem(
+            raw_item_id=raw.id,
+            source_id=source.id,
+            canonical_url=item["url"],
+            title=item["title"],
+            summary=item["summary"],
+            body=item["body"] or item["summary"],
+            language=source.detected_language,
+            image_url=item["image_url"],
+            published_at=item["published_at"],
+            category_hints=category_hints,
+            location_hints=location_hints,
+            extraction_status="url_scraped",
+        )
+        db.add(normalized)
+        db.flush()
+        _store_best_location(db, normalized, location_hints)
+        db.add(
+            EventCandidate(
+                normalized_item_id=normalized.id,
+                source_id=source.id,
+                title=normalized.title,
+                summary=normalized.summary,
+                category_hints=category_hints,
+                location_hints=location_hints,
+                risk_hint=_risk_hint(category_hints),
+            )
+        )
+        job.normalized_count += 1
+        job.event_candidate_count += 1
+        processed += 1
+        if processed % settings.ingest_commit_batch_size == 0:
+            db.commit()
+            db.refresh(job)
+        if settings.ingest_item_pause_seconds:
+            time.sleep(settings.ingest_item_pause_seconds)
 
 
 def _risk_hint(categories: list[str]) -> str:

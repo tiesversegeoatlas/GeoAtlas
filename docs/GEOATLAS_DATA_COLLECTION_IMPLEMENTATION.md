@@ -212,10 +212,26 @@ For each new RSS item with an article URL, ingestion fetches the article page an
 Location configuration:
 
 ```text
+GEOATLAS_HEADLESS_SEARCH_ENABLED=true
+GEOATLAS_HEADLESS_SEARCH_URL=https://www.bing.com/search
+GEOATLAS_HEADLESS_SEARCH_TIMEOUT_SECONDS=12
+GEOATLAS_HEADLESS_BROWSER_EXECUTABLE=
+GEOATLAS_URL_SCRAPE_MAX_ARTICLES=10
+GEOATLAS_HEALTH_URL_PROBE_ARTICLES=1
 GEOATLAS_GEOCODER_URL=https://nominatim.openstreetmap.org/search
 GEOATLAS_GEOCODER_TIMEOUT_SECONDS=5
 GEOATLAS_GEOCODER_MIN_INTERVAL_SECONDS=1.0
 ```
+
+When direct article extraction is blocked or returns incomplete body/image metadata, GeoAtlas reuses one headless Chrome/Edge instance for the current ingestion job. It searches the exact headline, opens the strongest matching result, extracts rendered JSON-LD/Open Graph/body content, and uses an image-search result only when the article still has no image. Set `GEOATLAS_HEADLESS_SEARCH_ENABLED=false` to disable this fallback.
+
+The browser runs in a small helper process because Windows API worker threads may not support Playwright subprocess creation. If browser search fails, ingestion keeps the RSS title/summary and continues. An ingestion failure is recorded on the job but does not mark the source as failing or hide its link; only the explicit RSS health check changes source health visibility.
+
+If an RSS health check receives content that is definitively not RSS or Atom, the source is retained and marked `connector_type=url`, `status=url`, and `enabled=false`. Timeouts, HTTP errors, SSL failures, and rate limits are not reclassified because they may be temporary. Run `python scripts/mark_non_feed_urls.py --apply` from `backend` to backfill historical confirmed non-feed records.
+
+URL records use `Run scrape` rather than RSS ingestion. The headless worker opens the homepage, scores same-site article links, visits at most `GEOATLAS_URL_SCRAPE_MAX_ARTICLES`, and stores canonical URL, title, description, rendered body, image, publication time, categories, and locations through the same normalized/public API tables. Existing content hashes prevent duplicates. If an article exposes no location, a configured country scope such as `United States` or subdivision scope such as `us-mt` is used as a lower-confidence fallback.
+
+Every source health check tries RSS/Atom first. If that fails for any reason, it probes URL scraping using at most `GEOATLAS_HEALTH_URL_PROBE_ARTICLES`. A successful probe marks the source as usable `connector_type=url`, while a source is marked failing only when both RSS and URL scraping fail. RSS checks remain concurrent, but URL probes are serialized to avoid launching several browsers and causing local lag.
 
 Known country names and AllAfrica country-prefix aliases use canonical country codes and coordinates directly. Only conservative dateline candidates require the external geocoder; low-quality place types such as shops, roads, and buildings are rejected. Geocoder results are cached in-process and rate limited. Set `GEOATLAS_GEOCODER_URL=` to disable external geocoding while retaining text-based location hints.
 

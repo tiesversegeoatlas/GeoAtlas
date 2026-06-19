@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.article_utils import infer_location_candidates, sanitize_location_hints
+from app.article_utils import infer_location_candidates, sanitize_location_hints, source_scope_location_hint
 from app.feed_utils import repair_mojibake, strip_text
 
 
@@ -18,6 +18,12 @@ class TextQualityTests(unittest.TestCase):
 
 
 class LocationQualityTests(unittest.TestCase):
+    def test_us_state_source_scope_is_a_low_confidence_fallback(self) -> None:
+        hint = source_scope_location_hint("us-mt")
+        self.assertEqual(hint["name"], "Montana, United States")
+        self.assertEqual(hint["country_code"], "US")
+        self.assertLess(hint["confidence"], 0.7)
+
     def test_headline_country_wins_over_month_words(self) -> None:
         hints = infer_location_candidates(
             "Nigeria: Nigeria Inflation Quickens As Fuel Costs Rise",

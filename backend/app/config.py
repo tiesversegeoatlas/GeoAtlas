@@ -24,7 +24,10 @@ class Settings:
     max_feed_bytes: int = int(getenv("GEOATLAS_MAX_FEED_BYTES", "5242880"))
     user_agent: str = getenv("GEOATLAS_USER_AGENT", "GeoAtlasDataCollector/1.0")
     ingest_max_new_items: int = int(getenv("GEOATLAS_INGEST_MAX_NEW_ITEMS", "25"))
-    article_enrichment_enabled: bool = getenv("GEOATLAS_ARTICLE_ENRICHMENT_ENABLED", "false").lower() in {
+    ingest_commit_batch_size: int = max(1, int(getenv("GEOATLAS_INGEST_COMMIT_BATCH_SIZE", "5")))
+    ingest_item_pause_seconds: float = max(0, float(getenv("GEOATLAS_INGEST_ITEM_PAUSE_SECONDS", "0.05")))
+    ingest_worker_count: int = max(1, int(getenv("GEOATLAS_INGEST_WORKER_COUNT", "1")))
+    article_enrichment_enabled: bool = getenv("GEOATLAS_ARTICLE_ENRICHMENT_ENABLED", "true").lower() in {
         "1",
         "true",
         "yes",
@@ -32,7 +35,18 @@ class Settings:
     }
     article_fetch_timeout_seconds: int = int(getenv("GEOATLAS_ARTICLE_FETCH_TIMEOUT_SECONDS", "4"))
     max_article_bytes: int = int(getenv("GEOATLAS_MAX_ARTICLE_BYTES", "2097152"))
-    external_geocoding_enabled: bool = getenv("GEOATLAS_EXTERNAL_GEOCODING_ENABLED", "false").lower() in {
+    headless_search_enabled: bool = getenv("GEOATLAS_HEADLESS_SEARCH_ENABLED", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    headless_search_url: str = getenv("GEOATLAS_HEADLESS_SEARCH_URL", "https://www.bing.com/search")
+    headless_search_timeout_seconds: int = int(getenv("GEOATLAS_HEADLESS_SEARCH_TIMEOUT_SECONDS", "12"))
+    headless_browser_executable: str | None = getenv("GEOATLAS_HEADLESS_BROWSER_EXECUTABLE") or None
+    url_scrape_max_articles: int = max(1, int(getenv("GEOATLAS_URL_SCRAPE_MAX_ARTICLES", "10")))
+    health_url_probe_articles: int = max(1, int(getenv("GEOATLAS_HEALTH_URL_PROBE_ARTICLES", "1")))
+    external_geocoding_enabled: bool = getenv("GEOATLAS_EXTERNAL_GEOCODING_ENABLED", "true").lower() in {
         "1",
         "true",
         "yes",

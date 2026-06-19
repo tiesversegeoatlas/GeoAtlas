@@ -94,6 +94,21 @@ REJECTED_LOCATION_WORDS = MONTHS | {
     "policy", "legal", "justice", "money", "food", "report", "government",
     "parliament", "province", "project", "education", "global", "chapter",
 }
+US_STATE_NAMES = {
+    "al": "Alabama", "ak": "Alaska", "az": "Arizona", "ar": "Arkansas",
+    "ca": "California", "co": "Colorado", "ct": "Connecticut", "de": "Delaware",
+    "fl": "Florida", "ga": "Georgia", "hi": "Hawaii", "id": "Idaho",
+    "il": "Illinois", "in": "Indiana", "ia": "Iowa", "ks": "Kansas",
+    "ky": "Kentucky", "la": "Louisiana", "me": "Maine", "md": "Maryland",
+    "ma": "Massachusetts", "mi": "Michigan", "mn": "Minnesota", "ms": "Mississippi",
+    "mo": "Missouri", "mt": "Montana", "ne": "Nebraska", "nv": "Nevada",
+    "nh": "New Hampshire", "nj": "New Jersey", "nm": "New Mexico", "ny": "New York",
+    "nc": "North Carolina", "nd": "North Dakota", "oh": "Ohio", "ok": "Oklahoma",
+    "or": "Oregon", "pa": "Pennsylvania", "ri": "Rhode Island",
+    "sc": "South Carolina", "sd": "South Dakota", "tn": "Tennessee", "tx": "Texas",
+    "ut": "Utah", "vt": "Vermont", "va": "Virginia", "wa": "Washington",
+    "wv": "West Virginia", "wi": "Wisconsin", "wy": "Wyoming", "dc": "District of Columbia",
+}
 
 
 @dataclass
@@ -252,6 +267,43 @@ def sanitize_location_hints(hints: list[dict] | None) -> list[dict]:
             continue
         clean.append(hint)
     return clean
+
+
+def source_scope_location_hint(scope: str | None) -> dict[str, Any] | None:
+    normalized = (scope or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized in PLACE_DATA:
+        name, country_code, latitude, longitude = PLACE_DATA[normalized]
+        return {
+            "name": name,
+            "country_code": country_code,
+            "latitude": latitude,
+            "longitude": longitude,
+            "confidence": 0.58,
+            "method": "source_scope",
+            "evidence": scope,
+        }
+    if normalized == "us":
+        name, country_code, latitude, longitude = PLACE_DATA["united states"]
+        return {
+            "name": name,
+            "country_code": country_code,
+            "latitude": latitude,
+            "longitude": longitude,
+            "confidence": 0.55,
+            "method": "source_scope",
+            "evidence": scope,
+        }
+    if normalized.startswith("us-") and normalized[3:] in US_STATE_NAMES:
+        return {
+            "name": f"{US_STATE_NAMES[normalized[3:]]}, United States",
+            "country_code": "US",
+            "confidence": 0.6,
+            "method": "source_scope",
+            "evidence": scope,
+        }
+    return None
 
 
 def _add_candidate(

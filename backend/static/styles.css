@@ -419,6 +419,11 @@ select:focus {
   background: #f9fafb;
 }
 
+.source-web-url {
+  border-left-color: #7c3aed;
+  background: #faf8ff;
+}
+
 .source-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(170px, 220px);
@@ -551,6 +556,11 @@ select:focus {
 
 .source-archived .source-health {
   background: #f2f4f7;
+}
+
+.source-web-url .source-health {
+  background: #f3efff;
+  border-color: #d9ccff;
 }
 
 .source-actions {

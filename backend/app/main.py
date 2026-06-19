@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session, selectinload
 from app.admin_keys import validate_admin_key
 from app.article_utils import infer_location_candidates, sanitize_location_hints
 from app.config import get_settings
-from app.database import Base, engine, get_db
+from app.database import Base, SessionLocal, engine, get_db
 from app.feed_utils import FeedError
+from app.headless_search import HeadlessNewsSearcher
+from app.ingestion_runner import schedule_ingestion, shutdown_ingestion_runner
 from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, RawFetchedItem
 from app.schemas import (
     DetectRequest,
@@ -37,7 +39,7 @@ from app.schemas import (
     SourceResponse,
     SourceUpdate,
 )
-from app.services import bulk_create_sources, check_source_health, create_source, detect_source, find_duplicate_source, run_ingestion, url_fingerprints
+from app.services import bulk_create_sources, check_source_health, create_ingestion_job, create_source, detect_source, find_duplicate_source, url_fingerprints
 
 settings = get_settings()
 
@@ -66,9 +68,22 @@ def initialize_database() -> None:
         Base.metadata.create_all(bind=engine)
         app.state.database_ready = True
         app.state.database_error = None
+        with SessionLocal() as db:
+            active_job_ids = list(
+                db.scalars(
+                    select(IngestionJob.id).where(IngestionJob.status.in_(["queued", "running"]))
+                )
+            )
+        for job_id in active_job_ids:
+            schedule_ingestion(job_id)
     except SQLAlchemyError as exc:
         app.state.database_ready = False
         app.state.database_error = str(exc)
+
+
+@app.on_event("shutdown")
+def stop_ingestion_runner() -> None:
+    shutdown_ingestion_runner()
 
 
 def require_admin(x_admin_key: str | None = Header(default=None), db: Session = Depends(get_db)) -> None:
@@ -249,7 +264,8 @@ def mark_source(source_id: str, payload: SourceMarkRequest, db: Session = Depend
 @app.post("/api/v1/sources/{source_id}/check-health", response_model=SourceHealthCheckResponse, dependencies=[Depends(require_admin)])
 def check_source_rss_health(source_id: str, db: Session = Depends(get_db)) -> dict:
     source = source_or_404(db, source_id)
-    checked_source, working, message = check_source_health(db, source)
+    with HeadlessNewsSearcher() as searcher:
+        checked_source, working, message = check_source_health(db, source, searcher=searcher)
     return {"source": checked_source, "working": working, "message": message}
 
 
@@ -286,7 +302,23 @@ def purge_source(source_id: str, db: Session = Depends(get_db)) -> dict:
 @app.post("/api/v1/sources/{source_id}/ingest", response_model=IngestResponse, dependencies=[Depends(require_admin)])
 def ingest_source(source_id: str, db: Session = Depends(get_db)) -> dict:
     source = source_or_404(db, source_id)
-    job = run_ingestion(db, source)
+    active_job = db.scalar(
+        select(IngestionJob)
+        .where(
+            IngestionJob.source_id == source.id,
+            IngestionJob.status.in_(["queued", "running"]),
+        )
+        .order_by(desc(IngestionJob.created_at))
+        .limit(1)
+    )
+    if active_job:
+        return {"job": active_job}
+    job = create_ingestion_job(db, source)
+    if not schedule_ingestion(job.id):
+        job.status = "failed"
+        job.error_message = "The ingestion worker is shutting down. Restart the API and try again."
+        db.commit()
+        db.refresh(job)
     return {"job": job}
 
 

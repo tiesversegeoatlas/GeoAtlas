@@ -168,6 +168,21 @@ function setBusy(button, busyText) {
   };
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function waitForIngestion(job, onProgress) {
+  let current = job;
+  while (current.status === "queued" || current.status === "running") {
+    onProgress(current);
+    await wait(current.status === "queued" ? 800 : 1200);
+    current = await api(`/api/v1/ingestion/jobs/${current.id}`, { headers: adminHeaders() });
+  }
+  onProgress(current);
+  return current;
+}
+
 async function checkHealth() {
   try {
     const data = await api("/health");
@@ -279,7 +294,7 @@ els.saveSource.addEventListener("click", async () => {
       }),
     });
     showMessage(`Saved source: ${source.name}`);
-    await loadSources();
+    await loadSources({ refreshIndex: true });
     selectOutputSource(source.id);
     await loadOutput(source.id);
   } catch (error) {
@@ -363,7 +378,7 @@ function setHealthProgress({ checked = 0, total = 0, working = 0, failing = 0, l
     : label || `Checking ${checked}/${total}`;
 }
 
-async function loadSources({ keepPage = true } = {}) {
+async function loadSources({ keepPage = true, refreshIndex = false } = {}) {
   if (!els.adminKey.value.trim()) {
     els.sourceList.innerHTML = `<div class="empty">Enter a generated admin key to load sources.</div>`;
     state.sources = [];
@@ -383,11 +398,19 @@ async function loadSources({ keepPage = true } = {}) {
     state.sourcePagination.total = page.total;
     if (state.sourcePagination.offset >= page.total && page.total > 0) {
       state.sourcePagination.offset = Math.max(0, Math.floor((page.total - 1) / state.sourcePagination.limit) * state.sourcePagination.limit);
-      return loadSources({ keepPage: true });
+      return loadSources({ keepPage: true, refreshIndex });
     }
     renderSources();
     renderSourcePager();
-    await loadSourceIndex();
+    if (refreshIndex || !state.allSources.length) {
+      await loadSourceIndex();
+    } else {
+      const pageIds = new Set(state.sources.map((source) => source.id));
+      state.allSources = state.allSources
+        .filter((source) => !pageIds.has(source.id))
+        .concat(state.sources);
+      updateOutputSourceOptions();
+    }
   } catch (error) {
     renderPanelError(els.sourceList, error);
     showMessage(error.message, "bad");
@@ -423,13 +446,17 @@ function renderSource(source) {
   const isChecking = source.healthCheckStatus === "checking";
   const isWorking = source.enabled && !source.archived && source.status === "active";
   const isArchived = source.archived || source.status === "archived";
+  const isUrl = source.status === "url";
+  const isUrlConnector = source.connector_type === "url";
   const isUnchecked = !isArchived && source.status === "unchecked";
-  const healthClass = isChecking ? "checking" : isArchived ? "archived" : isWorking ? "working" : isUnchecked ? "unchecked" : "broken";
-  const healthLabel = isChecking ? "Checking" : isArchived ? "Archived" : isWorking ? "Working" : isUnchecked ? "Unchecked" : "Not working";
+  const healthClass = isChecking ? "checking" : isArchived ? "archived" : isUrl ? "web-url" : isWorking ? "working" : isUnchecked ? "unchecked" : "broken";
+  const healthLabel = isChecking ? "Checking" : isArchived ? "Archived" : isUrl ? "URL" : isWorking ? "Working" : isUnchecked ? "Unchecked" : "Not working";
   const healthNote = isChecking
     ? "Testing RSS response and feed format"
     : isArchived
     ? "Stored as archived and hidden from public output"
+    : isUrl
+      ? "Stored as a webpage URL; no RSS/Atom feed detected"
     : isWorking
       ? "Visible in public output"
       : isUnchecked
@@ -460,12 +487,12 @@ function renderSource(source) {
       <div class="source-actions">
         <div class="action-group">
           ${isArchived ? "" : `
-            <button type="button" data-action="ingest">Run ingest</button>
+            <button type="button" data-action="ingest">${isUrlConnector ? "Run scrape" : "Run ingest"}</button>
             <button type="button" data-action="view">View output</button>
           `}
         </div>
         <div class="action-group health-actions">
-          ${isArchived ? "" : `
+          ${isArchived || isUrl ? "" : `
             <button type="button" class="status-toggle ${isWorking ? "active" : ""}" data-action="mark-working" ${isWorking ? "disabled" : ""}>Working</button>
             <button type="button" class="status-toggle ${!isWorking && !isUnchecked ? "active danger-state" : ""}" data-action="mark-broken" ${!isWorking && !isUnchecked ? "disabled" : ""}>Not working</button>
           `}
@@ -486,15 +513,30 @@ els.sourceList.addEventListener("click", async (event) => {
   const card = event.target.closest(".source-card");
   if (!button || !card) return;
   const sourceId = card.dataset.sourceId;
+  const sourceRecord = state.sources.find((source) => source.id === sourceId);
+  const isUrlSource = sourceRecord?.connector_type === "url";
   try {
     if (button.dataset.action === "ingest") {
-      const done = setBusy(button, "Running...");
-      const result = await api(`/api/v1/sources/${sourceId}/ingest`, { method: "POST", headers: adminHeaders() });
-      done();
-      showMessage(`Ingestion ${result.job.status}: ${result.job.normalized_count} normalized items.`);
-      await loadSources();
-      selectOutputSource(sourceId);
-      await loadOutput(sourceId);
+      const done = setBusy(button, "Queueing...");
+      try {
+        const result = await api(`/api/v1/sources/${sourceId}/ingest`, { method: "POST", headers: adminHeaders() });
+        const job = await waitForIngestion(result.job, (current) => {
+          button.textContent = current.status === "queued"
+            ? "Queued..."
+            : `${isUrlSource ? "Scraping" : "Ingesting"} ${current.normalized_count}/${Math.max(current.fetched_count, current.normalized_count, 1)}...`;
+        });
+        showMessage(
+          job.status === "success"
+            ? `${isUrlSource ? "Scrape" : "Ingestion"} complete: ${job.normalized_count} normalized items.`
+            : `${isUrlSource ? "Scrape" : "Ingestion"} failed: ${job.error_message || "Unknown error."}`,
+          job.status === "success" ? "good" : "bad"
+        );
+        await loadSources();
+        selectOutputSource(sourceId);
+        await loadOutput(sourceId);
+      } finally {
+        done();
+      }
     }
     if (button.dataset.action === "view") {
       selectOutputSource(sourceId);
@@ -508,6 +550,8 @@ els.sourceList.addEventListener("click", async (event) => {
         headers: adminHeaders(),
         body: JSON.stringify({ working }),
       });
+      updateIndexedSource(source);
+      updateOutputSourceOptions();
       done();
       showMessage(`${source.name} marked ${working ? "working" : "not working"}.`);
       await loadSources();
@@ -521,7 +565,7 @@ els.sourceList.addEventListener("click", async (event) => {
       if (state.selectedOutputSourceId === sourceId) {
         selectOutputSource("");
       }
-      await loadSources();
+      await loadSources({ refreshIndex: true });
       await loadOutput(state.selectedOutputSourceId);
     }
     if (button.dataset.action === "purge") {
@@ -533,7 +577,7 @@ els.sourceList.addEventListener("click", async (event) => {
       if (state.selectedOutputSourceId === sourceId) {
         selectOutputSource("");
       }
-      await loadSources();
+      await loadSources({ refreshIndex: true });
       await loadOutput(state.selectedOutputSourceId);
     }
   } catch (error) {
@@ -546,6 +590,7 @@ function updateOutputSourceOptions() {
   const current = state.selectedOutputSourceId;
   const sources = state.allSources.length ? state.allSources : state.sources;
   els.outputSource.innerHTML = `<option value="">All sources</option>` + sources
+    .filter((source) => source.enabled && !source.archived)
     .map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(source.name)}</option>`)
     .join("");
   els.outputSource.value = current;
@@ -947,7 +992,7 @@ async function importCsvRows() {
   }
   done();
   state.csvImporting = false;
-  await loadSources();
+  await loadSources({ refreshIndex: true });
   renderCsvPreview();
   updateCsvImportProgress({ completed, total: rows.length, added, skipped, failed, done: true });
   showMessage(`CSV import finished: ${added} added, ${skipped} duplicates skipped, ${failed} failed.`, failed ? "bad" : "good");
@@ -1062,7 +1107,7 @@ async function checkAllSourceHealth() {
     const concurrency = 6;
     let nextIndex = 0;
     let activeName = "";
-    showMessage(`Cleaning ${sources.length} RSS source${sources.length === 1 ? "" : "s"}...`);
+    showMessage(`Checking ${sources.length} source${sources.length === 1 ? "" : "s"}...`);
 
     const checkNext = async () => {
       while (!state.healthStopRequested) {
@@ -1110,7 +1155,7 @@ async function checkAllSourceHealth() {
           total: sources.length,
           working,
           failing,
-          label: `Cleaning RSS sources${activeName ? ` - ${activeName}` : ""}`,
+          label: `Checking sources${activeName ? ` - ${activeName}` : ""}`,
         });
         renderSources();
       }
@@ -1125,10 +1170,10 @@ async function checkAllSourceHealth() {
         failing,
         label: `Stopped: ${checked}/${sources.length} checked`,
       });
-      showMessage(`RSS cleaning stopped: ${checked}/${sources.length} checked.`, "bad");
+      showMessage(`Source health check stopped: ${checked}/${sources.length} checked.`, "bad");
     } else {
       setHealthProgress({ checked, total: sources.length, working, failing, done: true });
-      showMessage(`RSS cleaning complete: ${working} working, ${failing} not working.`);
+      showMessage(`Source health check complete: ${working} usable, ${failing} not working.`);
     }
     await loadSources({ keepPage: true });
     await loadOutput(state.selectedOutputSourceId);
