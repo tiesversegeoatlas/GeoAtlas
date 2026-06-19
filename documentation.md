@@ -40,6 +40,32 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Pixel-Matched GeoAtlas Home Dashboard
+
+**Developer:** Codex
+
+**Goal:** Rebuild the frontend homepage to match the supplied Geo Atlas command-center reference while retaining live backend integration.
+
+**What changed:**
+- `frontend/src/app/page.tsx`: Replaced the previous marketing landing page with the operational intelligence dashboard.
+- `frontend/src/components/home/GeoAtlasCommandCenter.tsx`: Added the reference sidebar, top search, live overview, hotspots, intelligence feed, country profile, risk index, strategic reports, and timeline layout.
+- `frontend/src/components/home/HomeWorldMap.tsx`: Added a dark live world map populated with coordinates from current GeoAtlas output.
+- `frontend/src/app/globals.css`: Added exact dashboard sizing, spacing, colors, borders, type scale, controls, cards, charts, responsive behavior, and map styling.
+- Live backend items populate map markers, counts, country activity, hotspots, report cards, images, risk summaries, and search results.
+- `frontend/src/components/layout/TopNavbar.tsx`: Removed a clock hydration mismatch affecting other frontend routes.
+
+**How to run or verify:**
+- Run `npm run dev` from `frontend`.
+- Open `http://127.0.0.1:3000/` at a 1536 x 1024 viewport.
+- Run `npm run build` from `frontend` and `python -m pytest -q` from `backend`.
+
+**Output or result:**
+- The home route now presents the supplied dense Geo Atlas dashboard design instead of a marketing page.
+- All primary dashboard data is sourced from the FastAPI backend rather than hard-coded examples.
+
+**Known issues or follow-ups:**
+- Map tiles require network access; the dashboard keeps its framed loading background while tiles are unavailable.
+
 ### 2026-06-20 - Combined Frontend and Backend Launcher
 
 **Developer:** Codex

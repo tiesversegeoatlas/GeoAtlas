@@ -19,7 +19,7 @@ import { usePathname } from "next/navigation";
 
 export function TopNavbar() {
   const { setSearchQuery, events, loading, error, loadEvents } = useEventStore();
-  const [time, setTime] = useState(new Date());
+  const [time, setTime] = useState<Date | null>(null);
   const pathname = usePathname();
   const hasSidebar = pathname !== "/" && pathname !== "/login" && pathname !== "/register";
 
@@ -50,7 +50,7 @@ export function TopNavbar() {
             <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest leading-none mb-1">Current UTC Time</span>
             <div className="flex items-center gap-2 text-sm font-mono font-bold text-primary">
               <Clock className="w-3.5 h-3.5" />
-              {time.toLocaleTimeString('en-US', { hour12: false, timeZone: 'UTC' })}
+              {time ? time.toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" }) : "--:--:--"}
             </div>
           </div>
 
