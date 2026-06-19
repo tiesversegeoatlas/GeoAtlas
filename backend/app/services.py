@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -21,6 +21,7 @@ from app.article_utils import (
 from app.config import get_settings
 from app.feed_utils import (
     FeedError,
+    article_url_fingerprint,
     discover_feeds_from_html,
     extract_category_hints,
     extract_location_hints,
@@ -338,6 +339,7 @@ def run_ingestion(
 
         feed_items = parsed["items"]
         content_hashes = [item_hash(item) for item in feed_items]
+        existing_article_urls = _existing_article_urls(db, feed_items)
         existing_hashes = set(
             db.scalars(
                 select(RawFetchedItem.content_hash).where(
@@ -347,14 +349,20 @@ def run_ingestion(
             )
         ) if content_hashes else set()
         pending_items = []
+        pending_article_urls = set(existing_article_urls)
         for item, content_hash in zip(feed_items, content_hashes):
             job.fetched_count += 1
-            if content_hash in existing_hashes:
+            article_url = article_url_fingerprint(item.get("url"))
+            if content_hash in existing_hashes or (
+                article_url and article_url in pending_article_urls
+            ):
                 job.duplicate_raw_count += 1
                 continue
             if len(pending_items) >= settings.ingest_max_new_items:
                 break
             pending_items.append((item, content_hash))
+            if article_url:
+                pending_article_urls.add(article_url)
 
         prefetched_articles = (
             _prefetch_articles(
@@ -372,7 +380,7 @@ def run_ingestion(
                 source_id=source.id,
                 job_id=job.id,
                 source_item_id=item.get("id"),
-                source_url=item.get("url"),
+                source_url=article_url_fingerprint(item.get("url")) or item.get("url"),
                 title=item.get("title"),
                 raw_payload=_jsonable_item(item),
                 content_hash=content_hash,
@@ -444,7 +452,7 @@ def run_ingestion(
                 id=normalized_id,
                 raw_item_id=raw_id,
                 source_id=source.id,
-                canonical_url=item.get("url"),
+                canonical_url=article_url_fingerprint(item.get("url")) or item.get("url"),
                 title=title,
                 summary=summary,
                 body=body,
@@ -517,6 +525,7 @@ def _store_url_scrape_results(
     ]
     job.fetched_count = len(items)
     hashes = [item_hash(item) for item in items]
+    existing_article_urls = _existing_article_urls(db, items)
     existing_hashes = set(
         db.scalars(
             select(RawFetchedItem.content_hash).where(
@@ -527,17 +536,23 @@ def _store_url_scrape_results(
     ) if hashes else set()
 
     processed = 0
+    pending_article_urls = set(existing_article_urls)
     for item, content_hash in zip(items, hashes):
-        if content_hash in existing_hashes:
+        article_url = article_url_fingerprint(item.get("url"))
+        if content_hash in existing_hashes or (
+            article_url and article_url in pending_article_urls
+        ):
             job.duplicate_raw_count += 1
             continue
+        if article_url:
+            pending_article_urls.add(article_url)
         raw_id = new_id()
         raw = RawFetchedItem(
             id=raw_id,
             source_id=source.id,
             job_id=job.id,
             source_item_id=item["id"],
-            source_url=item["url"],
+            source_url=article_url or item["url"],
             title=item["title"],
             raw_payload=_jsonable_item(item),
             content_hash=content_hash,
@@ -582,7 +597,7 @@ def _store_url_scrape_results(
             id=normalized_id,
             raw_item_id=raw_id,
             source_id=source.id,
-            canonical_url=item["url"],
+            canonical_url=article_url or item["url"],
             title=item["title"],
             summary=item["summary"],
             body=item["body"] or item["summary"],
@@ -641,6 +656,48 @@ def _prefetch_articles(items: list[dict], worker_count: int) -> dict[str, object
             except Exception:
                 articles[url] = None
     return articles
+
+
+def _existing_article_urls(db: Session, items: list[dict]) -> set[str]:
+    incoming_urls = {
+        fingerprint
+        for item in items
+        if (fingerprint := article_url_fingerprint(item.get("url")))
+    }
+    if not incoming_urls:
+        return set()
+    candidate_urls = incoming_urls | {f"{url}/" for url in incoming_urls if not url.endswith("/")}
+    normalized_candidates = {url.lower() for url in candidate_urls}
+    canonical_conditions = []
+    raw_conditions = []
+    for url in normalized_candidates:
+        canonical = func.lower(NormalizedItem.canonical_url)
+        raw = func.lower(RawFetchedItem.source_url)
+        canonical_conditions.extend(
+            [canonical == url, canonical.like(f"{url}?%"), canonical.like(f"{url}#%")]
+        )
+        raw_conditions.extend(
+            [raw == url, raw.like(f"{url}?%"), raw.like(f"{url}#%")]
+        )
+    stored_urls = set(
+        db.scalars(
+            select(NormalizedItem.canonical_url).where(
+                or_(*canonical_conditions)
+            )
+        )
+    )
+    stored_urls.update(
+        db.scalars(
+            select(RawFetchedItem.source_url).where(
+                or_(*raw_conditions)
+            )
+        )
+    )
+    return {
+        fingerprint
+        for value in stored_urls
+        if (fingerprint := article_url_fingerprint(value))
+    }
 
 
 def _merge_location_hints(*groups: list[dict]) -> list[dict]:

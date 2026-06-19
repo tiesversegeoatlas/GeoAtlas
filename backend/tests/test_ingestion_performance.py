@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base
-from app.feed_utils import FeedError, FetchResult
+from app.feed_utils import FeedError, FetchResult, article_url_fingerprint, item_hash
 from app.headless_search import HeadlessSearchResult, _unwrap_bing_url
 from app.main import ingest_source
 from app.models import ExternalSource, IngestionJob, NormalizedItem
@@ -68,6 +68,23 @@ class IngestionPerformanceSettingsTests(unittest.TestCase):
             ),
             "https://example.com/news/1",
         )
+
+    def test_article_identity_ignores_tracking_and_content_changes(self) -> None:
+        first = {
+            "url": "HTTPS://Example.com/news/story/?utm_source=rss#section",
+            "title": "Original title",
+            "summary": "Original summary",
+        }
+        changed = {
+            "url": "https://example.com/news/story",
+            "title": "Updated title",
+            "summary": "Updated summary",
+        }
+        self.assertEqual(
+            article_url_fingerprint(first["url"]),
+            "https://example.com/news/story",
+        )
+        self.assertEqual(item_hash(first), item_hash(changed))
 
 
 class BoundedIngestionTests(unittest.TestCase):
@@ -151,6 +168,57 @@ class BoundedIngestionTests(unittest.TestCase):
             self.assertEqual(job.normalized_count, 25)
             self.assertEqual(stored, 25)
             article_fetch.assert_not_called()
+
+    def test_article_url_is_not_fetched_again_from_another_source(self) -> None:
+        fetched = FetchResult(
+            url="https://example.com/feed",
+            content_type="application/rss+xml",
+            body=b"<rss />",
+            etag=None,
+            last_modified=None,
+        )
+        article_url = "https://example.com/news/already-collected"
+        parsed = {
+            "feed_type": "rss",
+            "title": "Example",
+            "site_url": "https://example.com",
+            "language": "en",
+            "items": [{
+                "id": "first-id",
+                "url": article_url,
+                "title": "Original headline",
+                "summary": "Original summary.",
+                "published_at": None,
+                "image_url": None,
+                "categories": [],
+                "raw": {},
+            }],
+        }
+
+        with Session(self.engine) as db:
+            first_source = ExternalSource(name="First", feed_url="https://example.com/first.xml")
+            second_source = ExternalSource(name="Second", feed_url="https://example.com/second.xml")
+            db.add_all([first_source, second_source])
+            db.commit()
+            settings = get_settings()
+            settings.article_enrichment_enabled = False
+            settings.ingest_item_pause_seconds = 0
+
+            with (
+                patch("app.services.get_settings", return_value=settings),
+                patch("app.services.safe_fetch", return_value=fetched),
+                patch("app.services.parse_feed_bytes", return_value=parsed),
+            ):
+                first_job = run_ingestion(db, first_source)
+                parsed["items"][0]["id"] = "changed-id"
+                parsed["items"][0]["title"] = "Updated headline"
+                parsed["items"][0]["summary"] = "Updated summary."
+                second_job = run_ingestion(db, second_source)
+
+            self.assertEqual(first_job.normalized_count, 1)
+            self.assertEqual(second_job.normalized_count, 0)
+            self.assertEqual(second_job.duplicate_raw_count, 1)
+            self.assertEqual(db.scalar(select(func.count()).select_from(NormalizedItem)), 1)
 
     def test_ingest_request_only_queues_one_job_per_source(self) -> None:
         with Session(self.engine) as db:

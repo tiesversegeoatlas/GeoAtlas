@@ -40,6 +40,29 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Do Not Refetch Collected Articles
+
+**Developer:** Codex
+
+**Goal:** Prevent collection from downloading and storing a news article again after its URL has already been collected.
+
+**What changed:**
+- `backend/app/feed_utils.py`: Added stable article URL fingerprints that normalize casing and trailing slashes and remove fragments and common tracking parameters.
+- `backend/app/services.py`: RSS and URL scraping now check article URLs across all stored sources before article extraction, headless fallback, geocoding, or database insertion.
+- `backend/app/services.py`: Duplicate URLs inside the same feed or scrape result are skipped during the same ingestion run.
+- `backend/tests/test_ingestion_performance.py`: Added coverage for changed titles/summaries, tracking URL variants, and the same article appearing through a second source.
+
+**How to run or verify:**
+- Run `python -m pytest -q` from `backend`.
+- Ingest two sources that contain the same article URL and confirm the second job reports it in `duplicate_raw_count` without creating another normalized item.
+
+**Output or result:**
+- Already collected article URLs are no longer fetched, enriched, geocoded, or stored again.
+- Feed entries without an article URL continue using the existing content-hash duplicate fallback.
+
+**Known issues or follow-ups:**
+- Different article URLs that contain independently published copies of the same story remain separate records; public output deduplication still handles strongly similar stories.
+
 ### 2026-06-20 - Faster Collection and Working Output Preview
 
 **Developer:** Codex

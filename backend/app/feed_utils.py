@@ -11,7 +11,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, build_opener
 from urllib.request import HTTPRedirectHandler
 from xml.etree import ElementTree
@@ -325,8 +325,41 @@ def discover_feeds_from_html(body: bytes, base_url: str) -> tuple[str | None, li
 
 
 def item_hash(item: dict[str, Any]) -> str:
+    article_url = article_url_fingerprint(item.get("url"))
+    if article_url:
+        return hashlib.sha256(article_url.encode("utf-8")).hexdigest()
     seed = "|".join(str(item.get(key) or "") for key in ["id", "url", "title", "summary"])
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def article_url_fingerprint(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return raw.rstrip("/").lower()
+    if not parsed.netloc:
+        return raw.rstrip("/").lower()
+    query = urlencode(
+        sorted(
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_")
+            and key.lower() not in {"fbclid", "gclid", "mc_cid", "mc_eid"}
+        ),
+        doseq=True,
+    )
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path.rstrip("/") or "/",
+            query,
+            "",
+        )
+    )
 
 
 COUNTRY_HINTS = {
