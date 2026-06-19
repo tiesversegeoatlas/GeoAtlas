@@ -133,6 +133,8 @@
                 <option value="all">Check all sources</option>
               </select>
               <button type="button" id="checkSourceHealth">Check RSS health</button>
+              <button type="button" id="fetchAllRss">Fetch all RSS</button>
+              <button type="button" id="scrapeAllUrls">Scrape all URLs</button>
               <button type="button" id="stopSourceHealth" disabled>Stop</button>
               <button type="button" id="refreshSources">Refresh</button>
             </div>
@@ -162,9 +164,9 @@
               <div class="progress-fill" id="sourceHealthFill"></div>
             </div>
             <div class="health-progress-stats">
-              <span><strong id="sourceHealthChecked">0</strong> checked</span>
-              <span class="health-stat-good"><strong id="sourceHealthWorking">0</strong> working</span>
-              <span class="health-stat-bad"><strong id="sourceHealthFailing">0</strong> not working</span>
+              <span><strong id="sourceHealthChecked">0</strong> completed</span>
+              <span class="health-stat-good"><strong id="sourceHealthWorking">0</strong> successful</span>
+              <span class="health-stat-bad"><strong id="sourceHealthFailing">0</strong> failed</span>
               <span><strong id="sourceHealthRemaining">0</strong> remaining</span>
             </div>
           </div>

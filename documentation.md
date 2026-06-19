@@ -62,6 +62,7 @@ Use this format:
 - `backend/app/article_utils.py`: Uses country/state source scope as a low-confidence location fallback only when article-derived location evidence is empty.
 - `backend/app/services.py`, `backend/app/main.py`: Source health now tries RSS/Atom first and, after failure, performs a one-article URL scrape probe before deciding whether the source is usable.
 - `backend/static/app.js`: `Check all sources` includes URL records and reports usable sources whether they work through RSS or scraping.
+- `backend/static/index.html`, `backend/static/app.js`: Added `Fetch all RSS` and `Scrape all URLs` bulk controls with sequential processing, shared progress counters, and Stop support.
 - `backend/tests/test_ingestion_performance.py`: Added regression coverage for low-impact defaults.
 
 **How to run or verify:**

@@ -14,6 +14,8 @@ const state = {
   csvImporting: false,
   healthChecking: false,
   healthStopRequested: false,
+  bulkCollecting: false,
+  bulkStopRequested: false,
   sourcePagination: {
     offset: 0,
     limit: 25,
@@ -50,6 +52,8 @@ const els = {
   refreshSources: document.querySelector("#refreshSources"),
   healthCheckScope: document.querySelector("#healthCheckScope"),
   checkSourceHealth: document.querySelector("#checkSourceHealth"),
+  fetchAllRss: document.querySelector("#fetchAllRss"),
+  scrapeAllUrls: document.querySelector("#scrapeAllUrls"),
   stopSourceHealth: document.querySelector("#stopSourceHealth"),
   refreshOutput: document.querySelector("#refreshOutput"),
   copyOutput: document.querySelector("#copyOutput"),
@@ -1036,10 +1040,13 @@ els.outputSource.addEventListener("change", async () => {
 });
 els.refreshSources.addEventListener("click", loadSources);
 els.checkSourceHealth.addEventListener("click", checkAllSourceHealth);
+els.fetchAllRss.addEventListener("click", () => runBulkCollection("rss"));
+els.scrapeAllUrls.addEventListener("click", () => runBulkCollection("url"));
 els.stopSourceHealth.addEventListener("click", () => {
   state.healthStopRequested = true;
+  state.bulkStopRequested = true;
   els.stopSourceHealth.disabled = true;
-  els.sourceHealthSummary.textContent = "Stopping after current checks finish...";
+  els.sourceHealthSummary.textContent = "Stopping after the current source finishes...";
 });
 els.refreshOutput.addEventListener("click", () => loadOutput());
 els.copyOutput.addEventListener("click", async () => {
@@ -1084,10 +1091,12 @@ async function checkAllSourceHealth() {
     showMessage("Enter the generated admin key before checking RSS health.", "bad");
     return;
   }
-  if (state.healthChecking) return;
+  if (state.healthChecking || state.bulkCollecting) return;
   state.healthChecking = true;
   state.healthStopRequested = false;
   const done = setBusy(els.checkSourceHealth, "Checking...");
+  els.fetchAllRss.disabled = true;
+  els.scrapeAllUrls.disabled = true;
   els.stopSourceHealth.disabled = false;
   els.healthCheckScope.disabled = true;
   setHealthProgress({ label: "Loading sources..." });
@@ -1185,6 +1194,112 @@ async function checkAllSourceHealth() {
     state.healthStopRequested = false;
     els.stopSourceHealth.disabled = true;
     els.healthCheckScope.disabled = false;
+    els.fetchAllRss.disabled = false;
+    els.scrapeAllUrls.disabled = false;
+    done();
+  }
+}
+
+async function runBulkCollection(connectorType) {
+  if (!els.adminKey.value.trim()) {
+    showMessage("Enter the generated admin key before collecting sources.", "bad");
+    return;
+  }
+  if (state.healthChecking || state.bulkCollecting) return;
+  state.bulkCollecting = true;
+  state.bulkStopRequested = false;
+  const isUrl = connectorType === "url";
+  const activeButton = isUrl ? els.scrapeAllUrls : els.fetchAllRss;
+  const done = setBusy(activeButton, isUrl ? "Scraping..." : "Fetching...");
+  els.checkSourceHealth.disabled = true;
+  els.healthCheckScope.disabled = true;
+  (isUrl ? els.fetchAllRss : els.scrapeAllUrls).disabled = true;
+  els.stopSourceHealth.disabled = false;
+  let completed = 0;
+  let successful = 0;
+  let failed = 0;
+  try {
+    setHealthProgress({ label: "Loading sources..." });
+    await loadSourceIndex();
+    const sources = state.allSources.filter(
+      (source) => !source.archived && source.connector_type === connectorType
+    );
+    const operation = isUrl ? "URL scraping" : "RSS fetching";
+    if (!sources.length) {
+      setHealthProgress({ label: `No ${isUrl ? "URL" : "RSS"} sources found.`, done: true });
+      return;
+    }
+    showMessage(`${operation} started for ${sources.length} source${sources.length === 1 ? "" : "s"}.`);
+    for (const source of sources) {
+      if (state.bulkStopRequested) break;
+      setHealthProgress({
+        checked: completed,
+        total: sources.length,
+        working: successful,
+        failing: failed,
+        label: `${operation} ${completed + 1}/${sources.length}: ${source.name}`,
+      });
+      try {
+        const result = await api(`/api/v1/sources/${source.id}/ingest`, {
+          method: "POST",
+          headers: adminHeaders(),
+        });
+        const job = await waitForIngestion(result.job, (current) => {
+          setHealthProgress({
+            checked: completed,
+            total: sources.length,
+            working: successful,
+            failing: failed,
+            label: `${operation}: ${source.name} (${current.normalized_count} stored)`,
+          });
+        });
+        if (job.status === "success") {
+          successful += 1;
+        } else {
+          failed += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+      completed += 1;
+      setHealthProgress({
+        checked: completed,
+        total: sources.length,
+        working: successful,
+        failing: failed,
+        label: `${operation}: ${completed}/${sources.length} completed`,
+      });
+      await wait(50);
+    }
+    const stopped = state.bulkStopRequested;
+    setHealthProgress({
+      checked: completed,
+      total: sources.length,
+      working: successful,
+      failing: failed,
+      label: stopped
+        ? `${operation} stopped: ${completed}/${sources.length} completed`
+        : `${operation} complete: ${successful} successful, ${failed} failed`,
+      done: !stopped,
+    });
+    showMessage(
+      stopped
+        ? `${operation} stopped after ${completed} sources.`
+        : `${operation} complete: ${successful} successful, ${failed} failed.`,
+      failed ? "bad" : "good"
+    );
+    await loadSources({ keepPage: true });
+    await loadOutput(state.selectedOutputSourceId);
+  } catch (error) {
+    showMessage(error.message, "bad");
+  } finally {
+    state.bulkCollecting = false;
+    state.bulkStopRequested = false;
+    els.stopSourceHealth.disabled = true;
+    els.checkSourceHealth.disabled = false;
+    els.healthCheckScope.disabled = false;
+    els.fetchAllRss.disabled = false;
+    els.scrapeAllUrls.disabled = false;
     done();
   }
 }

@@ -233,6 +233,8 @@ URL records use `Run scrape` rather than RSS ingestion. The headless worker open
 
 Every source health check tries RSS/Atom first. If that fails for any reason, it probes URL scraping using at most `GEOATLAS_HEALTH_URL_PROBE_ARTICLES`. A successful probe marks the source as usable `connector_type=url`, while a source is marked failing only when both RSS and URL scraping fail. RSS checks remain concurrent, but URL probes are serialized to avoid launching several browsers and causing local lag.
 
+The Source Console also provides separate `Fetch all RSS` and `Scrape all URLs` actions. Each loads all matching non-archived sources and processes them sequentially through the existing queued ingestion endpoint, with completed/success/failed/remaining counters and a Stop action. Sources are never mass-enqueued, which keeps memory and local CPU usage bounded.
+
 Known country names and AllAfrica country-prefix aliases use canonical country codes and coordinates directly. Only conservative dateline candidates require the external geocoder; low-quality place types such as shops, roads, and buildings are rejected. Geocoder results are cached in-process and rate limited. Set `GEOATLAS_GEOCODER_URL=` to disable external geocoding while retaining text-based location hints.
 
 The best geocoded result is stored in `normalized_item_locations`, including latitude/longitude and the PostGIS `geography(Point, 4326)` value. Evidence and alternate candidates remain in `normalized_items.location_hints`.
