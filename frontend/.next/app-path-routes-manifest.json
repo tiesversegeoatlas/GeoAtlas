@@ -1,0 +1,12 @@
+{
+  "/(auth)/login/page": "/login",
+  "/(auth)/register/page": "/register",
+  "/(dashboard)/dashboard/page": "/dashboard",
+  "/(dashboard)/events/[id]/page": "/events/[id]",
+  "/(dashboard)/feed/page": "/feed",
+  "/(dashboard)/map/page": "/map",
+  "/_not-found/page": "/_not-found",
+  "/admin/page": "/admin",
+  "/favicon.ico/route": "/favicon.ico",
+  "/page": "/"
+}

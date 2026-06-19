@@ -1,0 +1,23 @@
+{
+  "pages": {
+    "/(dashboard)/events/[id]/page": [
+      "static/chunks/ff1a16fafef87110.js",
+      "static/chunks/6a7993b07cb97bb3.js",
+      "static/chunks/e8def6fa0baae439.css",
+      "static/chunks/6e20ef52aced4de3.css",
+      "static/chunks/be762cc4dcb7e4df.js",
+      "static/chunks/8a188fc5b226a2b9.js",
+      "static/chunks/ea1165ce162787ca.js",
+      "static/chunks/fb212cead8d08d29.js",
+      "static/chunks/222ce54d23e5a536.js",
+      "static/chunks/0ffe8d468c20d6bd.js",
+      "static/chunks/38cd035e5d4af09e.js",
+      "static/chunks/7eb6b8fe3d877e56.js",
+      "static/chunks/40a43cc397d2d939.js",
+      "static/chunks/f238c97ed4edfeda.js",
+      "static/chunks/8082ab48faca5ea1.js",
+      "static/chunks/916276f450790128.js",
+      "static/chunks/turbopack-4f3072cabc1c37b7.js"
+    ]
+  }
+}
