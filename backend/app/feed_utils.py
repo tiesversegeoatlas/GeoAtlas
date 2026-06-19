@@ -17,6 +17,7 @@ from urllib.request import HTTPRedirectHandler
 from xml.etree import ElementTree
 
 from app.config import get_settings
+from app.event_classifier import classify_event_types
 
 
 class FeedError(ValueError):
@@ -365,4 +366,4 @@ def extract_category_hints(text: str) -> list[str]:
     for category, words in CATEGORY_KEYWORDS.items():
         if any(word in lowered for word in words):
             categories.append(category)
-    return categories
+    return list(dict.fromkeys(categories + classify_event_types(text)))

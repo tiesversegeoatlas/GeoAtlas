@@ -11,6 +11,7 @@ from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.admin_keys import validate_admin_key
+from app.analytics import event_matches_filters, generate_event_statistics
 from app.article_utils import infer_location_candidates, sanitize_location_hints
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_db
@@ -395,9 +396,12 @@ def public_item(item_id: str, db: Session = Depends(get_db)) -> PublicItem:
 def public_events(
     db: Session = Depends(get_db),
     source_id: str | None = None,
+    risk_hint: str | None = None,
+    category: str | None = None,
+    country_code: str | None = None,
     limit: int = Query(default=25, ge=1, le=100),
 ) -> list[EventCandidate]:
-    candidate_limit = min(limit * 5, 500)
+    candidate_limit = min(limit * 10, 1000)
     statement = (
         select(EventCandidate, ExternalSource.reliability_score)
         .join(ExternalSource, EventCandidate.source_id == ExternalSource.id)
@@ -407,7 +411,35 @@ def public_events(
     )
     if source_id:
         statement = statement.where(EventCandidate.source_id == source_id)
-    return _deduplicate_events(list(db.execute(statement)))[:limit]
+    events = _deduplicate_events(list(db.execute(statement)))
+    return [
+        event
+        for event in events
+        if event_matches_filters(
+            event,
+            risk_hint=risk_hint,
+            category=category,
+            country_code=country_code,
+        )
+    ][:limit]
+
+
+@app.get("/api/v1/public/statistics")
+def public_statistics(
+    db: Session = Depends(get_db),
+    source_id: str | None = None,
+    limit: int = Query(default=1000, ge=1, le=5000),
+) -> dict:
+    statement = (
+        select(EventCandidate, ExternalSource)
+        .join(ExternalSource, EventCandidate.source_id == ExternalSource.id)
+        .where(ExternalSource.enabled.is_(True), ExternalSource.archived.is_(False))
+        .order_by(desc(EventCandidate.created_at))
+        .limit(limit)
+    )
+    if source_id:
+        statement = statement.where(EventCandidate.source_id == source_id)
+    return generate_event_statistics(db.execute(statement))
 
 
 @app.get("/api/v1/public/export.json")

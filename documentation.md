@@ -40,6 +40,32 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Compatible Backend PR Additions
+
+**Developer:** Codex
+
+**Goal:** Adopt useful backend additions from pull request #1 without replacing or breaking the current ingestion, health-check, scraping, and public API behavior.
+
+**What changed:**
+- `backend/app/event_classifier.py`, `backend/app/feed_utils.py`: Added specific disaster classification for earthquakes, floods, wildfires, and cyclones while retaining the existing category hints.
+- `backend/app/analytics.py`, `backend/app/main.py`: Added current-schema-compatible event filters and `GET /api/v1/public/statistics`.
+- `backend/app/geo_utils.py`: Added validated distance, bounding-box, GeoJSON, midpoint, and radius helpers, including safe polar and date-line handling.
+- `backend/tests/test_pr_backend_additions.py`: Added regression coverage for classification, filters, statistics, and geospatial helpers.
+- Deliberately excluded the PR's duplicate `/health` route and helpers that referenced event fields not present in the current schema.
+
+**How to run or verify:**
+- Run `python -m pytest -q` from `backend`.
+- Query `GET /api/v1/public/events?risk_hint=medium&category=flood&country_code=KE`.
+- Query `GET /api/v1/public/statistics`.
+
+**Output or result:**
+- All backend tests pass.
+- The current database-aware `/health` route remains the only registered health route.
+- Existing RSS ingestion, URL scraping, enrichment, and deduplication behavior remains in place.
+
+**Known issues or follow-ups:**
+- Public event filtering is applied after the existing reliability-aware deduplication so the current output semantics are preserved.
+
 ### 2026-06-19 - Low-Impact Ingestion
 
 **Developer:** Codex
