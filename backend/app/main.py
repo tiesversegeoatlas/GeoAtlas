@@ -59,7 +59,13 @@ app.add_middleware(
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+from app.health import health_check
 
+@app.get("/health")
+def health():
+
+    return health_check()
+    
 @app.on_event("startup")
 def initialize_database() -> None:
     try:
