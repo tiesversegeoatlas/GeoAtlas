@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
 
@@ -37,6 +37,11 @@ def validate_admin_key(db: Session, raw_key: str | None) -> bool:
     )
     if not admin_key:
         return False
-    admin_key.last_used_at = datetime.now(timezone.utc)
-    db.commit()
+    now = datetime.now(timezone.utc)
+    last_used_at = admin_key.last_used_at
+    if last_used_at is not None and last_used_at.tzinfo is None:
+        last_used_at = last_used_at.replace(tzinfo=timezone.utc)
+    if last_used_at is None or now - last_used_at >= timedelta(minutes=5):
+        admin_key.last_used_at = now
+        db.commit()
     return True

@@ -40,6 +40,34 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Faster Collection and Working Output Preview
+
+**Developer:** Codex
+
+**Goal:** Speed up collection without removing enrichment features and repair the output source dropdown and JSON display.
+
+**What changed:**
+- `backend/app/services.py`, `backend/app/config.py`: Direct article extraction now uses four bounded parallel fetchers per ingestion job while headless search fallback, location inference, geocoding, images, body extraction, and event creation remain enabled.
+- `backend/app/services.py`: Uses client-generated IDs to avoid unnecessary database flushes for raw and normalized rows.
+- `backend/app/admin_keys.py`: Continues validating every admin request but throttles the audit timestamp write to once per five minutes, avoiding a database commit on every progress poll.
+- `backend/app/config.py`, `backend/.env.example`: Increased the default commit batch to 25 and removed the artificial per-item pause while retaining one ingestion job worker to prevent PC lag.
+- `backend/app/main.py`: Added `GET /api/v1/public/output-sources`, returning only enabled sources that have collected output.
+- `backend/static/app.js`, `backend/static/index.html`: Removed the 5,919-source startup crawl from normal page loading, populated the output dropdown independently, added visible loading state, and limited the UI preview to 25 complete items/events.
+- `backend/tests/test_ingestion_performance.py`: Added default-setting and bounded-parallelism regression coverage.
+
+**How to run or verify:**
+- Run `python -m pytest -q` from `backend`.
+- Open the source console and confirm the output preview loads without waiting for the complete source index.
+- Select a source from the Output dropdown and confirm its JSON data and counts refresh.
+
+**Output or result:**
+- The output-source endpoint responds with a compact list instead of thousands of unused source options.
+- The output panel displays 25 complete items and events and updates correctly after dropdown selection.
+- Article-page network waits overlap with a maximum of four fetches, while database and browser-heavy work remain bounded.
+
+**Known issues or follow-ups:**
+- Full bulk health and collection operations still load the complete source index when explicitly started because those operations intentionally target all matching sources.
+
 ### 2026-06-20 - Compatible Backend PR Additions
 
 **Developer:** Codex

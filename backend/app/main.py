@@ -363,6 +363,28 @@ def public_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
     ]
 
 
+@app.get("/api/v1/public/output-sources", response_model=list[PublicSource])
+def public_output_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
+    sources = db.scalars(
+        select(ExternalSource)
+        .join(NormalizedItem, NormalizedItem.source_id == ExternalSource.id)
+        .where(ExternalSource.enabled.is_(True), ExternalSource.archived.is_(False))
+        .distinct()
+        .order_by(ExternalSource.name)
+    )
+    return [
+        PublicSource(
+            id=source.id,
+            name=source.name,
+            feed_url=source.feed_url,
+            site_url=source.site_url,
+            reliability_score=source.reliability_score,
+            last_success_at=source.last_success_at,
+        )
+        for source in sources
+    ]
+
+
 @app.get("/api/v1/public/items", response_model=PublicItemsResponse)
 def public_items(
     db: Session = Depends(get_db),

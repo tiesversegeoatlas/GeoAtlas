@@ -2,6 +2,8 @@ const state = {
   selectedCandidate: null,
   sources: [],
   allSources: [],
+  sourceIndexLoaded: false,
+  outputSources: [],
   sourceDuplicateIndex: {
     urls: new Map(),
     names: new Map(),
@@ -359,8 +361,8 @@ async function loadSourceIndex() {
     offset += page.sources.length;
   }
   state.allSources = sources;
+  state.sourceIndexLoaded = true;
   rebuildSourceDuplicateIndex();
-  updateOutputSourceOptions();
 }
 
 function updateIndexedSource(updatedSource) {
@@ -406,14 +408,13 @@ async function loadSources({ keepPage = true, refreshIndex = false } = {}) {
     }
     renderSources();
     renderSourcePager();
-    if (refreshIndex || !state.allSources.length) {
+    if (refreshIndex && state.sourceIndexLoaded) {
       await loadSourceIndex();
     } else {
       const pageIds = new Set(state.sources.map((source) => source.id));
       state.allSources = state.allSources
         .filter((source) => !pageIds.has(source.id))
         .concat(state.sources);
-      updateOutputSourceOptions();
     }
   } catch (error) {
     renderPanelError(els.sourceList, error);
@@ -536,6 +537,7 @@ els.sourceList.addEventListener("click", async (event) => {
           job.status === "success" ? "good" : "bad"
         );
         await loadSources();
+        if (job.status === "success") await loadOutputSources();
         selectOutputSource(sourceId);
         await loadOutput(sourceId);
       } finally {
@@ -592,9 +594,7 @@ els.sourceList.addEventListener("click", async (event) => {
 
 function updateOutputSourceOptions() {
   const current = state.selectedOutputSourceId;
-  const sources = state.allSources.length ? state.allSources : state.sources;
-  els.outputSource.innerHTML = `<option value="">All sources</option>` + sources
-    .filter((source) => source.enabled && !source.archived)
+  els.outputSource.innerHTML = `<option value="">All sources</option>` + state.outputSources
     .map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(source.name)}</option>`)
     .join("");
   els.outputSource.value = current;
@@ -602,7 +602,30 @@ function updateOutputSourceOptions() {
 
 function selectOutputSource(sourceId) {
   state.selectedOutputSourceId = sourceId || "";
+  if (
+    state.selectedOutputSourceId
+    && !state.outputSources.some((source) => source.id === state.selectedOutputSourceId)
+  ) {
+    const source = [...state.sources, ...state.allSources]
+      .find((candidate) => candidate.id === state.selectedOutputSourceId);
+    if (source) {
+      state.outputSources.push(source);
+      state.outputSources.sort((left, right) => left.name.localeCompare(right.name));
+      updateOutputSourceOptions();
+    }
+  }
   els.outputSource.value = state.selectedOutputSourceId;
+}
+
+async function loadOutputSources() {
+  try {
+    state.outputSources = await api("/api/v1/public/output-sources");
+    updateOutputSourceOptions();
+  } catch (error) {
+    state.outputSources = [];
+    updateOutputSourceOptions();
+    showMessage(`Output source list failed: ${error.message}`, "bad");
+  }
 }
 
 function csvCell(value) {
@@ -1003,9 +1026,12 @@ async function importCsvRows() {
 }
 
 async function loadOutput(sourceId = state.selectedOutputSourceId) {
+  els.outputSummary.textContent = "Loading output...";
+  els.outputPreview.textContent = JSON.stringify({ status: "loading" }, null, 2);
   try {
-    const suffix = sourceId ? `?source_id=${encodeURIComponent(sourceId)}` : "";
-    state.output = await api(`/api/v1/public/export.json${suffix}`);
+    const params = new URLSearchParams({ limit: "25" });
+    if (sourceId) params.set("source_id", sourceId);
+    state.output = await api(`/api/v1/public/export.json?${params}`);
     els.outputPreview.textContent = JSON.stringify(localizeTimestamps(state.output), null, 2);
     els.outputSummary.textContent = `${state.output.items.length} items, ${state.output.events.length} events`;
   } catch (error) {
@@ -1255,6 +1281,7 @@ async function runBulkCollection(connectorType) {
         });
         if (job.status === "success") {
           successful += 1;
+          await loadOutputSources();
         } else {
           failed += 1;
         }
@@ -1306,4 +1333,5 @@ async function runBulkCollection(connectorType) {
 
 checkHealth();
 loadSources();
+loadOutputSources();
 loadOutput();

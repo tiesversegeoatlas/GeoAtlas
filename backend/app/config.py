@@ -24,9 +24,10 @@ class Settings:
     max_feed_bytes: int = int(getenv("GEOATLAS_MAX_FEED_BYTES", "5242880"))
     user_agent: str = getenv("GEOATLAS_USER_AGENT", "GeoAtlasDataCollector/1.0")
     ingest_max_new_items: int = int(getenv("GEOATLAS_INGEST_MAX_NEW_ITEMS", "25"))
-    ingest_commit_batch_size: int = max(1, int(getenv("GEOATLAS_INGEST_COMMIT_BATCH_SIZE", "5")))
-    ingest_item_pause_seconds: float = max(0, float(getenv("GEOATLAS_INGEST_ITEM_PAUSE_SECONDS", "0.05")))
+    ingest_commit_batch_size: int = max(1, int(getenv("GEOATLAS_INGEST_COMMIT_BATCH_SIZE", "25")))
+    ingest_item_pause_seconds: float = max(0, float(getenv("GEOATLAS_INGEST_ITEM_PAUSE_SECONDS", "0")))
     ingest_worker_count: int = max(1, int(getenv("GEOATLAS_INGEST_WORKER_COUNT", "1")))
+    article_fetch_workers: int = max(1, min(8, int(getenv("GEOATLAS_ARTICLE_FETCH_WORKERS", "4"))))
     article_enrichment_enabled: bool = getenv("GEOATLAS_ARTICLE_ENRICHMENT_ENABLED", "true").lower() in {
         "1",
         "true",

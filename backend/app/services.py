@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -29,7 +30,7 @@ from app.feed_utils import (
     safe_fetch,
 )
 from app.headless_search import HeadlessNewsSearcher
-from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, NormalizedItemLocation, RawFetchedItem
+from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, NormalizedItemLocation, RawFetchedItem, new_id
 
 NON_FEED_ERRORS = {
     "The URL did not return parseable RSS or Atom XML.",
@@ -345,17 +346,29 @@ def run_ingestion(
                 )
             )
         ) if content_hashes else set()
-        new_items_processed = 0
-
+        pending_items = []
         for item, content_hash in zip(feed_items, content_hashes):
             job.fetched_count += 1
             if content_hash in existing_hashes:
                 job.duplicate_raw_count += 1
                 continue
-            if new_items_processed >= settings.ingest_max_new_items:
+            if len(pending_items) >= settings.ingest_max_new_items:
                 break
-            new_items_processed += 1
+            pending_items.append((item, content_hash))
+
+        prefetched_articles = (
+            _prefetch_articles(
+                [item for item, _ in pending_items],
+                settings.article_fetch_workers,
+            )
+            if settings.article_enrichment_enabled
+            else {}
+        )
+
+        for new_items_processed, (item, content_hash) in enumerate(pending_items, start=1):
+            raw_id = new_id()
             raw = RawFetchedItem(
+                id=raw_id,
                 source_id=source.id,
                 job_id=job.id,
                 source_item_id=item.get("id"),
@@ -366,7 +379,6 @@ def run_ingestion(
                 published_at=item.get("published_at"),
             )
             db.add(raw)
-            db.flush()
 
             title = item.get("title") or "Untitled feed item"
             summary = item.get("summary")
@@ -377,15 +389,15 @@ def run_ingestion(
             extraction_status = "rss_only"
             if settings.article_enrichment_enabled and item.get("url"):
                 searched = None
-                try:
-                    article = extract_article(item["url"])
+                article = prefetched_articles.get(item["url"])
+                if article is not None:
                     title = article.title or title
                     summary = article.summary or summary
                     body = article.body or body
-                    image_url = article.image_url
+                    image_url = article.image_url or image_url
                     published_at = article.published_at or published_at
                     extraction_status = "article_enriched"
-                except Exception:
+                else:
                     extraction_status = "article_fetch_failed"
                 needs_search = extraction_status == "article_fetch_failed" or not image_url or len(body or "") < 120
                 if searcher and needs_search:
@@ -427,8 +439,10 @@ def run_ingestion(
             if not location_hints:
                 scope_hint = source_scope_location_hint(source.country_scope)
                 location_hints = [scope_hint] if scope_hint else []
+            normalized_id = new_id()
             normalized = NormalizedItem(
-                raw_item_id=raw.id,
+                id=normalized_id,
+                raw_item_id=raw_id,
                 source_id=source.id,
                 canonical_url=item.get("url"),
                 title=title,
@@ -442,12 +456,11 @@ def run_ingestion(
                 extraction_status=extraction_status,
             )
             db.add(normalized)
-            db.flush()
             _store_best_location(db, normalized, location_hints)
             job.normalized_count += 1
 
             candidate = EventCandidate(
-                normalized_item_id=normalized.id,
+                normalized_item_id=normalized_id,
                 source_id=source.id,
                 title=title,
                 summary=summary,
@@ -518,7 +531,9 @@ def _store_url_scrape_results(
         if content_hash in existing_hashes:
             job.duplicate_raw_count += 1
             continue
+        raw_id = new_id()
         raw = RawFetchedItem(
+            id=raw_id,
             source_id=source.id,
             job_id=job.id,
             source_item_id=item["id"],
@@ -529,7 +544,6 @@ def _store_url_scrape_results(
             published_at=item["published_at"],
         )
         db.add(raw)
-        db.flush()
 
         article_text = " ".join(
             part
@@ -563,8 +577,10 @@ def _store_url_scrape_results(
         if not location_hints:
             scope_hint = source_scope_location_hint(source.country_scope)
             location_hints = [scope_hint] if scope_hint else []
+        normalized_id = new_id()
         normalized = NormalizedItem(
-            raw_item_id=raw.id,
+            id=normalized_id,
+            raw_item_id=raw_id,
             source_id=source.id,
             canonical_url=item["url"],
             title=item["title"],
@@ -578,11 +594,10 @@ def _store_url_scrape_results(
             extraction_status="url_scraped",
         )
         db.add(normalized)
-        db.flush()
         _store_best_location(db, normalized, location_hints)
         db.add(
             EventCandidate(
-                normalized_item_id=normalized.id,
+                normalized_item_id=normalized_id,
                 source_id=source.id,
                 title=normalized.title,
                 summary=normalized.summary,
@@ -607,6 +622,25 @@ def _risk_hint(categories: list[str]) -> str:
     if "natural_disaster" in categories:
         return "medium"
     return "unknown"
+
+
+def _prefetch_articles(items: list[dict], worker_count: int) -> dict[str, object]:
+    urls = list(dict.fromkeys(item.get("url") for item in items if item.get("url")))
+    if not urls:
+        return {}
+    articles = {}
+    with ThreadPoolExecutor(
+        max_workers=min(worker_count, len(urls)),
+        thread_name_prefix="geoatlas-article",
+    ) as executor:
+        futures = {executor.submit(extract_article, url): url for url in urls}
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                articles[url] = future.result()
+            except Exception:
+                articles[url] = None
+    return articles
 
 
 def _merge_location_hints(*groups: list[dict]) -> list[dict]:

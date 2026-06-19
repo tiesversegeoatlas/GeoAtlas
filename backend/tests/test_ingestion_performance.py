@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -13,7 +15,7 @@ from app.feed_utils import FeedError, FetchResult
 from app.headless_search import HeadlessSearchResult, _unwrap_bing_url
 from app.main import ingest_source
 from app.models import ExternalSource, IngestionJob, NormalizedItem
-from app.services import check_source_health, run_ingestion
+from app.services import _prefetch_articles, check_source_health, run_ingestion
 
 
 class IngestionPerformanceSettingsTests(unittest.TestCase):
@@ -44,6 +46,21 @@ class IngestionPerformanceSettingsTests(unittest.TestCase):
             get_settings.cache_clear()
             self.assertEqual(get_settings().ingest_worker_count, 1)
 
+    def test_article_fetches_use_bounded_parallelism_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GEOATLAS_ARTICLE_FETCH_WORKERS", None)
+            get_settings.cache_clear()
+            self.assertEqual(get_settings().article_fetch_workers, 4)
+
+    def test_ingestion_batches_database_work_without_artificial_delay(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GEOATLAS_INGEST_COMMIT_BATCH_SIZE", None)
+            os.environ.pop("GEOATLAS_INGEST_ITEM_PAUSE_SECONDS", None)
+            get_settings.cache_clear()
+            settings = get_settings()
+            self.assertEqual(settings.ingest_commit_batch_size, 25)
+            self.assertEqual(settings.ingest_item_pause_seconds, 0)
+
     def test_bing_redirect_is_unwrapped_to_canonical_article(self) -> None:
         self.assertEqual(
             _unwrap_bing_url(
@@ -61,6 +78,28 @@ class BoundedIngestionTests(unittest.TestCase):
     def tearDown(self) -> None:
         get_settings.cache_clear()
         self.engine.dispose()
+
+    def test_article_prefetch_uses_bounded_parallel_workers(self) -> None:
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fetch(url: str) -> str:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return url
+
+        items = [{"url": f"https://example.com/{index}"} for index in range(4)]
+        with patch("app.services.extract_article", side_effect=fetch):
+            results = _prefetch_articles(items, worker_count=2)
+
+        self.assertEqual(set(results), {item["url"] for item in items})
+        self.assertEqual(max_active, 2)
 
     def test_default_ingest_stores_only_25_new_items(self) -> None:
         items = [
