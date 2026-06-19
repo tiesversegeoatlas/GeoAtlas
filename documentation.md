@@ -40,6 +40,28 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Combined Frontend and Backend Launcher
+
+**Developer:** Codex
+
+**Goal:** Make starting the frontend automatically start the FastAPI backend.
+
+**What changed:**
+- `frontend/package.json`: `npm run dev` now launches Uvicorn on port 8000 and Next.js on port 3000 together through `concurrently`.
+- `frontend/package.json`: Added separate `dev:backend` and `dev:frontend` commands for targeted development.
+- `frontend/README.md`: Documented the one-command development workflow and service URLs.
+
+**How to run or verify:**
+- Stop any existing process on ports 3000 and 8000.
+- Run `npm run dev` from `frontend`.
+- Open `http://127.0.0.1:3000/feed` and `http://127.0.0.1:8000/health`.
+
+**Output or result:**
+- One frontend command starts both services and stopping it terminates both child processes.
+
+**Known issues or follow-ups:**
+- Python and the backend dependencies must be available in the active environment.
+
 ### 2026-06-20 - Lillyasmi Frontend Integration
 
 **Developer:** Codex
