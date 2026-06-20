@@ -4,8 +4,10 @@ import os
 import re
 import base64
 import json
+import queue
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -47,7 +49,10 @@ class HeadlessNewsSearcher:
         assert process.stdout is not None
         process.stdin.write(request + "\n")
         process.stdin.flush()
-        response = process.stdout.readline()
+        response = self._read_response(
+            process,
+            timeout_seconds=self.settings.headless_search_timeout_seconds * 3,
+        )
         if not response:
             error = process.stderr.read() if process.stderr else ""
             raise RuntimeError(error.strip() or "Headless search worker stopped unexpectedly.")
@@ -73,7 +78,11 @@ class HeadlessNewsSearcher:
         assert process.stdout is not None
         process.stdin.write(request + "\n")
         process.stdin.flush()
-        response = process.stdout.readline()
+        response = self._read_response(
+            process,
+            timeout_seconds=self.settings.headless_search_timeout_seconds
+            * (min(limit or self.settings.url_scrape_max_articles, 10) + 2),
+        )
         if not response:
             error = process.stderr.read() if process.stderr else ""
             raise RuntimeError(error.strip() or "Headless scraping worker stopped unexpectedly.")
@@ -81,6 +90,32 @@ class HeadlessNewsSearcher:
         if payload.get("error"):
             raise RuntimeError(payload["error"])
         return [HeadlessSearchResult(**item) for item in payload.get("results") or []]
+
+    def _read_response(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        timeout_seconds: int,
+    ) -> str:
+        assert process.stdout is not None
+        responses: queue.Queue[str] = queue.Queue(maxsize=1)
+
+        def read_line() -> None:
+            responses.put(process.stdout.readline())
+
+        threading.Thread(target=read_line, daemon=True).start()
+        try:
+            return responses.get(timeout=timeout_seconds)
+        except queue.Empty as exc:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            self._process = None
+            raise TimeoutError(
+                f"Headless browser operation timed out after {timeout_seconds} seconds."
+            ) from exc
 
     def close(self) -> None:
         if self._process is None:

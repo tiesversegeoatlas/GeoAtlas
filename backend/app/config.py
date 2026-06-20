@@ -37,6 +37,7 @@ class Settings:
     scheduler_poll_seconds: int = max(10, int(getenv("GEOATLAS_SCHEDULER_POLL_SECONDS", "30")))
     scheduler_max_pending_jobs: int = max(1, int(getenv("GEOATLAS_SCHEDULER_MAX_PENDING_JOBS", "2")))
     scheduler_source_scan_limit: int = max(10, int(getenv("GEOATLAS_SCHEDULER_SOURCE_SCAN_LIMIT", "200")))
+    scheduler_job_timeout_seconds: int = max(60, int(getenv("GEOATLAS_SCHEDULER_JOB_TIMEOUT_SECONDS", "300")))
     article_enrichment_enabled: bool = getenv("GEOATLAS_ARTICLE_ENRICHMENT_ENABLED", "true").lower() in {
         "1",
         "true",

@@ -914,3 +914,11 @@ Use this format:
 - RSS parsing is dependency-light and should later be upgraded with stronger article extraction and feed compatibility.
 - Location extraction is currently simple keyword matching; replace with a geocoder or NLP pipeline.
 - Add automated tests around URL safety, feed detection, duplicate handling, and public output schemas.
+# Continuous Collection Visibility Fix
+
+The collection scheduler now prioritizes healthy RSS/Atom sources before slower
+URL-only scraping sources. Headless-browser requests have a hard timeout, and
+scheduled jobs that exceed five minutes are released so they cannot permanently
+block the bounded queue. Public news output places dated articles before
+undated records, preventing older undated items from occupying the frontend's
+latest-news page.

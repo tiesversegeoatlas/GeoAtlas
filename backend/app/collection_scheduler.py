@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -51,6 +51,22 @@ def collect_due_sources_once(
 ) -> list[str]:
     settings = get_settings()
     now = now or datetime.now(timezone.utc)
+    stale_before = now - timedelta(seconds=settings.scheduler_job_timeout_seconds)
+    stale_jobs = list(
+        db.scalars(
+            select(IngestionJob).where(
+                IngestionJob.status.in_(["queued", "running"]),
+                IngestionJob.created_at < stale_before,
+            )
+        )
+    )
+    for job in stale_jobs:
+        job.status = "failed"
+        job.error_message = "Ingestion exceeded the configured scheduler timeout."
+        job.finished_at = now
+    if stale_jobs:
+        db.commit()
+
     active_job_source_ids = list(
         db.scalars(
             select(IngestionJob.source_id).where(
@@ -71,7 +87,10 @@ def collect_due_sources_once(
                 ExternalSource.archived.is_(False),
                 ExternalSource.status.in_(["active", "url"]),
             )
-            .order_by(ExternalSource.updated_at.asc())
+            .order_by(
+                case((ExternalSource.status == "active", 0), else_=1),
+                ExternalSource.updated_at.asc(),
+            )
             .limit(settings.scheduler_source_scan_limit)
         )
     )

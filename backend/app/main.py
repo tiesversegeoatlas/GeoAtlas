@@ -142,6 +142,7 @@ def health(db: Session = Depends(get_db)) -> dict:
             "enabled": settings.scheduler_enabled,
             "poll_seconds": settings.scheduler_poll_seconds,
             "max_pending_jobs": settings.scheduler_max_pending_jobs,
+            "job_timeout_seconds": settings.scheduler_job_timeout_seconds,
         },
     }
 
@@ -406,7 +407,10 @@ def public_items(
         .join(NormalizedItem.source)
         .options(selectinload(NormalizedItem.source), selectinload(NormalizedItem.locations))
         .where(ExternalSource.enabled.is_(True), ExternalSource.archived.is_(False))
-        .order_by(desc(NormalizedItem.published_at), desc(NormalizedItem.created_at))
+        .order_by(
+            desc(NormalizedItem.published_at).nullslast(),
+            desc(NormalizedItem.created_at),
+        )
         .limit(candidate_limit)
     )
     if source_id:
@@ -568,7 +572,10 @@ def _deduplicate_items(items: list[NormalizedItem]) -> list[NormalizedItem]:
             selected[duplicate_index] = item
     return sorted(
         selected,
-        key=lambda item: item.published_at or item.created_at,
+        key=lambda item: (
+            item.published_at is not None,
+            item.published_at or item.created_at,
+        ),
         reverse=True,
     )
 

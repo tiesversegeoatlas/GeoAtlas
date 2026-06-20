@@ -250,6 +250,43 @@ class BoundedIngestionTests(unittest.TestCase):
             self.assertIsNone(response.items[0].body)
             self.assertEqual(response.items[0].summary, "Short list summary")
 
+    def test_public_list_places_undated_items_after_dated_news(self) -> None:
+        from datetime import datetime, timezone
+        from app.main import public_items
+
+        with Session(self.engine) as db:
+            source = ExternalSource(
+                name="Ordering source",
+                feed_url="https://example.com/ordering.xml",
+                status="active",
+                enabled=True,
+            )
+            db.add(source)
+            db.commit()
+            db.add_all(
+                [
+                    NormalizedItem(
+                        raw_item_id="00000000-0000-0000-0000-000000000002",
+                        source_id=source.id,
+                        title="Undated news",
+                    ),
+                    NormalizedItem(
+                        raw_item_id="00000000-0000-0000-0000-000000000003",
+                        source_id=source.id,
+                        title="Dated news",
+                        published_at=datetime(2026, 6, 20, tzinfo=timezone.utc),
+                    ),
+                ]
+            )
+            db.commit()
+
+            response = public_items(db=db, limit=10, include_body=False)
+
+            self.assertEqual(
+                [item.title for item in response.items],
+                ["Dated news", "Undated news"],
+            )
+
     def test_scheduler_queues_only_due_sources(self) -> None:
         from datetime import datetime, timezone
 
@@ -322,6 +359,38 @@ class BoundedIngestionTests(unittest.TestCase):
                 1,
             )
             schedule.assert_not_called()
+
+    def test_scheduler_prioritizes_rss_before_url_scraping(self) -> None:
+        with Session(self.engine) as db:
+            url_source = ExternalSource(
+                name="Older URL source",
+                feed_url="https://example.com/",
+                connector_type="url",
+                status="url",
+                enabled=True,
+            )
+            rss_source = ExternalSource(
+                name="RSS source",
+                feed_url="https://example.com/feed.xml",
+                connector_type="rss",
+                status="active",
+                enabled=True,
+            )
+            db.add_all([url_source, rss_source])
+            db.commit()
+            settings = get_settings()
+            settings.scheduler_max_pending_jobs = 1
+            settings.scheduler_source_scan_limit = 20
+
+            with (
+                patch("app.collection_scheduler.get_settings", return_value=settings),
+                patch("app.collection_scheduler.schedule_ingestion", return_value=True),
+            ):
+                collect_due_sources_once(db)
+
+            job = db.scalar(select(IngestionJob))
+            self.assertIsNotNone(job)
+            self.assertEqual(job.source_id, rss_source.id)
 
     def test_ingest_request_only_queues_one_job_per_source(self) -> None:
         with Session(self.engine) as db:
