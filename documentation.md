@@ -10,6 +10,7 @@ Technical reference documents:
 | [HLD.md](HLD.md) | High-level backend architecture and system context. |
 | [docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md](docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md) | Runnable GeoAtlas data collection implementation notes. |
 | [backend/db/geoatlas_data_collection_schema.sql](backend/db/geoatlas_data_collection_schema.sql) | Supabase Postgres + PostGIS schema for the data collection service. |
+| [docs/LARGE_SCALE_HOSTING_GUIDE.md](docs/LARGE_SCALE_HOSTING_GUIDE.md) | Production platform comparison, recommended AWS architecture, specifications, costs, and upgrade roadmap. |
 
 ## How To Add An Entry
 
