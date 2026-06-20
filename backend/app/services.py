@@ -307,6 +307,8 @@ def run_ingestion(
     job.started_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(job)
+    job_id = job.id
+    source_id = source.id
 
     try:
         if source.connector_type == "url":
@@ -364,15 +366,25 @@ def run_ingestion(
             if article_url:
                 pending_article_urls.add(article_url)
 
+        enrich_article_pages = (
+            settings.article_enrichment_enabled
+            and trigger_type != "scheduled"
+        )
         prefetched_articles = (
             _prefetch_articles(
                 [item for item, _ in pending_items],
                 settings.article_fetch_workers,
             )
-            if settings.article_enrichment_enabled
+            if enrich_article_pages
             else {}
         )
 
+        headless_searches_used = 0
+        headless_search_limit = (
+            settings.scheduled_headless_search_max_items
+            if trigger_type == "scheduled"
+            else settings.headless_search_max_items_per_job
+        )
         for new_items_processed, (item, content_hash) in enumerate(pending_items, start=1):
             raw_id = new_id()
             raw = RawFetchedItem(
@@ -387,6 +399,7 @@ def run_ingestion(
                 published_at=item.get("published_at"),
             )
             db.add(raw)
+            db.flush()
 
             title = item.get("title") or "Untitled feed item"
             summary = item.get("summary")
@@ -395,7 +408,7 @@ def run_ingestion(
             published_at = item.get("published_at")
             location_text = None
             extraction_status = "rss_only"
-            if settings.article_enrichment_enabled and item.get("url"):
+            if enrich_article_pages and item.get("url"):
                 searched = None
                 article = prefetched_articles.get(item["url"])
                 if article is not None:
@@ -408,7 +421,12 @@ def run_ingestion(
                 else:
                     extraction_status = "article_fetch_failed"
                 needs_search = extraction_status == "article_fetch_failed" or not image_url or len(body or "") < 120
-                if searcher and needs_search:
+                if (
+                    searcher
+                    and needs_search
+                    and headless_searches_used < headless_search_limit
+                ):
+                    headless_searches_used += 1
                     try:
                         searched = searcher.search(title, item.get("url"))
                     except Exception:
@@ -464,6 +482,7 @@ def run_ingestion(
                 extraction_status=extraction_status,
             )
             db.add(normalized)
+            db.flush()
             _store_best_location(db, normalized, location_hints)
             job.normalized_count += 1
 
@@ -489,6 +508,11 @@ def run_ingestion(
         source.last_error = None
         source.last_success_at = datetime.now(timezone.utc)
     except Exception as exc:
+        db.rollback()
+        job = db.get(IngestionJob, job_id)
+        source = db.get(ExternalSource, source_id)
+        if job is None or source is None:
+            raise
         job.status = "failed"
         job.error_message = str(exc)
         source.last_error = str(exc)

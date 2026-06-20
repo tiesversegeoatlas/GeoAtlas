@@ -54,6 +54,14 @@ class Settings:
     }
     headless_search_url: str = getenv("GEOATLAS_HEADLESS_SEARCH_URL", "https://www.bing.com/search")
     headless_search_timeout_seconds: int = int(getenv("GEOATLAS_HEADLESS_SEARCH_TIMEOUT_SECONDS", "12"))
+    headless_search_max_items_per_job: int = max(
+        0,
+        int(getenv("GEOATLAS_HEADLESS_SEARCH_MAX_ITEMS_PER_JOB", "3")),
+    )
+    scheduled_headless_search_max_items: int = max(
+        0,
+        int(getenv("GEOATLAS_SCHEDULED_HEADLESS_SEARCH_MAX_ITEMS", "0")),
+    )
     headless_browser_executable: str | None = getenv("GEOATLAS_HEADLESS_BROWSER_EXECUTABLE") or None
     url_scrape_max_articles: int = max(1, int(getenv("GEOATLAS_URL_SCRAPE_MAX_ARTICLES", "10")))
     health_url_probe_articles: int = max(1, int(getenv("GEOATLAS_HEALTH_URL_PROBE_ARTICLES", "1")))

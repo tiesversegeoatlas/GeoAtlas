@@ -922,3 +922,13 @@ scheduled jobs that exceed five minutes are released so they cannot permanently
 block the bounded queue. Public news output places dated articles before
 undated records, preventing older undated items from occupying the frontend's
 latest-news page.
+
+Ingestion jobs now run in isolated subprocesses so a timed-out feed can be
+terminated for real. RSS browser fallback enrichment is bounded per job and
+records are committed in small batches, allowing new headlines to become
+visible while the remainder of a feed is still being processed.
+
+Scheduled RSS cycles prioritize freshness and store feed-provided titles,
+summaries, images, dates, categories, and inferred locations immediately.
+Manual ingestion and URL-source collection retain full article-page and
+headless-browser enrichment.

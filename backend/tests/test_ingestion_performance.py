@@ -59,7 +59,7 @@ class IngestionPerformanceSettingsTests(unittest.TestCase):
             os.environ.pop("GEOATLAS_INGEST_ITEM_PAUSE_SECONDS", None)
             get_settings.cache_clear()
             settings = get_settings()
-            self.assertEqual(settings.ingest_commit_batch_size, 25)
+            self.assertEqual(settings.ingest_commit_batch_size, 5)
             self.assertEqual(settings.ingest_item_pause_seconds, 0)
 
     def test_bing_redirect_is_unwrapped_to_canonical_article(self) -> None:
@@ -169,6 +169,48 @@ class BoundedIngestionTests(unittest.TestCase):
             self.assertEqual(job.normalized_count, 25)
             self.assertEqual(stored, 25)
             article_fetch.assert_not_called()
+
+    def test_scheduled_ingestion_stores_feed_data_without_page_enrichment(self) -> None:
+        fetched = FetchResult(
+            url="https://example.com/feed",
+            content_type="application/rss+xml",
+            body=b"<rss />",
+            etag=None,
+            last_modified=None,
+        )
+        parsed = {
+            "feed_type": "rss",
+            "title": "Example",
+            "site_url": "https://example.com",
+            "language": "en",
+            "items": [{
+                "id": "latest",
+                "url": "https://example.com/latest",
+                "title": "Latest scheduled headline",
+                "summary": "Feed summary",
+                "published_at": None,
+                "image_url": None,
+                "categories": [],
+                "raw": {},
+            }],
+        }
+        with Session(self.engine) as db:
+            source = ExternalSource(name="Scheduled", feed_url=fetched.url)
+            db.add(source)
+            db.commit()
+            settings = get_settings()
+            settings.article_enrichment_enabled = True
+
+            with (
+                patch("app.services.get_settings", return_value=settings),
+                patch("app.services.safe_fetch", return_value=fetched),
+                patch("app.services.parse_feed_bytes", return_value=parsed),
+                patch("app.services._prefetch_articles") as prefetch,
+            ):
+                job = run_ingestion(db, source, trigger_type="scheduled")
+
+            self.assertEqual(job.normalized_count, 1)
+            prefetch.assert_not_called()
 
     def test_article_url_is_not_fetched_again_from_another_source(self) -> None:
         fetched = FetchResult(
@@ -391,6 +433,44 @@ class BoundedIngestionTests(unittest.TestCase):
             job = db.scalar(select(IngestionJob))
             self.assertIsNotNone(job)
             self.assertEqual(job.source_id, rss_source.id)
+
+    def test_scheduler_prioritizes_sources_that_previously_produced_news(self) -> None:
+        with Session(self.engine) as db:
+            unproductive = ExternalSource(
+                name="Untested source",
+                feed_url="https://example.com/untested.xml",
+                status="active",
+                enabled=True,
+            )
+            productive = ExternalSource(
+                name="Productive source",
+                feed_url="https://example.com/productive.xml",
+                status="active",
+                enabled=True,
+            )
+            db.add_all([unproductive, productive])
+            db.commit()
+            db.add(
+                NormalizedItem(
+                    raw_item_id="00000000-0000-0000-0000-000000000004",
+                    source_id=productive.id,
+                    title="Previously collected news",
+                )
+            )
+            db.commit()
+            settings = get_settings()
+            settings.scheduler_max_pending_jobs = 1
+            settings.scheduler_source_scan_limit = 20
+
+            with (
+                patch("app.collection_scheduler.get_settings", return_value=settings),
+                patch("app.collection_scheduler.schedule_ingestion", return_value=True),
+            ):
+                collect_due_sources_once(db)
+
+            job = db.scalar(select(IngestionJob))
+            self.assertIsNotNone(job)
+            self.assertEqual(job.source_id, productive.id)
 
     def test_ingest_request_only_queues_one_job_per_source(self) -> None:
         with Session(self.engine) as db:

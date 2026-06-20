@@ -3,17 +3,18 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, select
+from sqlalchemy import case, select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import SessionLocal
 from app.ingestion_runner import schedule_ingestion
-from app.models import ExternalSource, IngestionJob
+from app.models import ExternalSource, IngestionJob, NormalizedItem
 
 _stop_event = threading.Event()
 _thread: threading.Thread | None = None
 _thread_lock = threading.Lock()
+_SCHEDULER_ADVISORY_LOCK_ID = 7_204_026
 
 
 def start_collection_scheduler() -> bool:
@@ -49,6 +50,31 @@ def collect_due_sources_once(
     *,
     now: datetime | None = None,
 ) -> list[str]:
+    uses_advisory_lock = db.get_bind().dialect.name == "postgresql"
+    if uses_advisory_lock:
+        acquired = bool(
+            db.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_id)"),
+                {"lock_id": _SCHEDULER_ADVISORY_LOCK_ID},
+            )
+        )
+        if not acquired:
+            return []
+    try:
+        return _collect_due_sources_unlocked(db, now=now)
+    finally:
+        if uses_advisory_lock:
+            db.execute(
+                text("SELECT pg_advisory_unlock(:lock_id)"),
+                {"lock_id": _SCHEDULER_ADVISORY_LOCK_ID},
+            )
+
+
+def _collect_due_sources_unlocked(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> list[str]:
     settings = get_settings()
     now = now or datetime.now(timezone.utc)
     stale_before = now - timedelta(seconds=settings.scheduler_job_timeout_seconds)
@@ -64,6 +90,10 @@ def collect_due_sources_once(
         job.status = "failed"
         job.error_message = "Ingestion exceeded the configured scheduler timeout."
         job.finished_at = now
+        source = db.get(ExternalSource, job.source_id)
+        if source:
+            source.last_failure_at = now
+            source.last_error = job.error_message
     if stale_jobs:
         db.commit()
 
@@ -89,6 +119,22 @@ def collect_due_sources_once(
             )
             .order_by(
                 case((ExternalSource.status == "active", 0), else_=1),
+                case(
+                    (
+                        select(NormalizedItem.id)
+                        .where(NormalizedItem.source_id == ExternalSource.id)
+                        .exists(),
+                        0,
+                    ),
+                    else_=1,
+                ),
+                case(
+                    (
+                        ExternalSource.last_failure_at.is_(None),
+                        0,
+                    ),
+                    else_=1,
+                ),
                 ExternalSource.updated_at.asc(),
             )
             .limit(settings.scheduler_source_scan_limit)
