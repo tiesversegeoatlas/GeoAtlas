@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.collection_scheduler import collect_due_sources_once
 from app.database import Base
 from app.feed_utils import FeedError, FetchResult, article_url_fingerprint, item_hash
 from app.headless_search import HeadlessSearchResult, _unwrap_bing_url
@@ -219,6 +220,108 @@ class BoundedIngestionTests(unittest.TestCase):
             self.assertEqual(second_job.normalized_count, 0)
             self.assertEqual(second_job.duplicate_raw_count, 1)
             self.assertEqual(db.scalar(select(func.count()).select_from(NormalizedItem)), 1)
+
+    def test_public_list_can_omit_large_article_bodies(self) -> None:
+        from app.main import public_items
+
+        with Session(self.engine) as db:
+            source = ExternalSource(
+                name="Fast output",
+                feed_url="https://example.com/fast.xml",
+                status="active",
+                enabled=True,
+            )
+            db.add(source)
+            db.commit()
+            item = NormalizedItem(
+                raw_item_id="00000000-0000-0000-0000-000000000001",
+                source_id=source.id,
+                title="Fast list item",
+                summary="Short list summary",
+                body="Full article body that belongs on the detail page.",
+                extraction_status="article_enriched",
+            )
+            db.add(item)
+            db.commit()
+
+            response = public_items(db=db, limit=10, include_body=False)
+
+            self.assertEqual(len(response.items), 1)
+            self.assertIsNone(response.items[0].body)
+            self.assertEqual(response.items[0].summary, "Short list summary")
+
+    def test_scheduler_queues_only_due_sources(self) -> None:
+        from datetime import datetime, timezone
+
+        with Session(self.engine) as db:
+            due = ExternalSource(
+                name="Due",
+                feed_url="https://example.com/due.xml",
+                status="active",
+                enabled=True,
+                fetch_interval_minutes=30,
+            )
+            recent = ExternalSource(
+                name="Recent",
+                feed_url="https://example.com/recent.xml",
+                status="active",
+                enabled=True,
+                fetch_interval_minutes=30,
+                last_success_at=datetime.now(timezone.utc),
+            )
+            db.add_all([due, recent])
+            db.commit()
+            settings = get_settings()
+            settings.scheduler_max_pending_jobs = 2
+            settings.scheduler_source_scan_limit = 20
+
+            with (
+                patch("app.collection_scheduler.get_settings", return_value=settings),
+                patch("app.collection_scheduler.schedule_ingestion", return_value=True) as schedule,
+            ):
+                job_ids = collect_due_sources_once(db)
+
+            jobs = list(db.scalars(select(IngestionJob)))
+            self.assertEqual(len(job_ids), 1)
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0].source_id, due.id)
+            self.assertEqual(jobs[0].trigger_type, "scheduled")
+            schedule.assert_called_once_with(jobs[0].id)
+
+    def test_scheduler_does_not_exceed_pending_job_cap(self) -> None:
+        with Session(self.engine) as db:
+            source = ExternalSource(
+                name="Bounded",
+                feed_url="https://example.com/bounded.xml",
+                status="active",
+                enabled=True,
+            )
+            db.add(source)
+            db.commit()
+            db.add(
+                IngestionJob(
+                    source_id=source.id,
+                    trigger_type="scheduled",
+                    status="running",
+                )
+            )
+            db.commit()
+            settings = get_settings()
+            settings.scheduler_max_pending_jobs = 1
+            settings.scheduler_source_scan_limit = 20
+
+            with (
+                patch("app.collection_scheduler.get_settings", return_value=settings),
+                patch("app.collection_scheduler.schedule_ingestion") as schedule,
+            ):
+                job_ids = collect_due_sources_once(db)
+
+            self.assertEqual(job_ids, [])
+            self.assertEqual(
+                db.scalar(select(func.count()).select_from(IngestionJob)),
+                1,
+            )
+            schedule.assert_not_called()
 
     def test_ingest_request_only_queues_one_job_per_source(self) -> None:
         with Session(self.engine) as db:

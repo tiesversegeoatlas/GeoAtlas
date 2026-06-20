@@ -14,6 +14,7 @@ from app.admin_keys import validate_admin_key
 from app.analytics import event_matches_filters, generate_event_statistics
 from app.article_utils import infer_location_candidates, sanitize_location_hints
 from app.config import get_settings
+from app.collection_scheduler import start_collection_scheduler, stop_collection_scheduler
 from app.database import Base, SessionLocal, engine, get_db
 from app.feed_utils import FeedError
 from app.headless_search import HeadlessNewsSearcher
@@ -77,6 +78,7 @@ def initialize_database() -> None:
             )
         for job_id in active_job_ids:
             schedule_ingestion(job_id)
+        start_collection_scheduler()
     except SQLAlchemyError as exc:
         app.state.database_ready = False
         app.state.database_error = str(exc)
@@ -84,6 +86,7 @@ def initialize_database() -> None:
 
 @app.on_event("shutdown")
 def stop_ingestion_runner() -> None:
+    stop_collection_scheduler()
     shutdown_ingestion_runner()
 
 
@@ -134,6 +137,11 @@ def health(db: Session = Depends(get_db)) -> dict:
             "anon_key_configured": bool(settings.supabase_anon_key),
             "service_role_key_configured": bool(settings.supabase_service_role_key),
             "postgres_connection_configured": not settings.database_url.startswith("sqlite"),
+        },
+        "collection_scheduler": {
+            "enabled": settings.scheduler_enabled,
+            "poll_seconds": settings.scheduler_poll_seconds,
+            "max_pending_jobs": settings.scheduler_max_pending_jobs,
         },
     }
 
@@ -390,8 +398,9 @@ def public_items(
     db: Session = Depends(get_db),
     source_id: str | None = None,
     limit: int = Query(default=25, ge=1, le=100),
+    include_body: bool = True,
 ) -> PublicItemsResponse:
-    candidate_limit = min(limit * 5, 500)
+    candidate_limit = min(limit * (5 if include_body else 2), 500)
     statement = (
         select(NormalizedItem)
         .join(NormalizedItem.source)
@@ -403,7 +412,10 @@ def public_items(
     if source_id:
         statement = statement.where(NormalizedItem.source_id == source_id)
     items = _deduplicate_items(list(db.scalars(statement)))[:limit]
-    return PublicItemsResponse(items=[_public_item(item) for item in items], next_cursor=None)
+    return PublicItemsResponse(
+        items=[_public_item(item, include_body=include_body) for item in items],
+        next_cursor=None,
+    )
 
 
 @app.get("/api/v1/public/items/{item_id}", response_model=PublicItem)
@@ -411,7 +423,7 @@ def public_item(item_id: str, db: Session = Depends(get_db)) -> PublicItem:
     item = db.get(NormalizedItem, item_id)
     if not item or not item.source.enabled or item.source.archived:
         raise HTTPException(status_code=404, detail="Item not found.")
-    return _public_item(item)
+    return _public_item(item, include_body=True)
 
 
 @app.get("/api/v1/public/events", response_model=list[PublicEvent])
@@ -466,7 +478,7 @@ def public_statistics(
 
 @app.get("/api/v1/public/export.json")
 def public_export(db: Session = Depends(get_db), source_id: str | None = None, limit: int = Query(default=100, ge=1, le=500)) -> dict:
-    items = public_items(db=db, source_id=source_id, limit=limit)
+    items = public_items(db=db, source_id=source_id, limit=limit, include_body=True)
     events = public_events(db=db, source_id=source_id, limit=limit)
     return {
         "items": [item.model_dump(mode="json") for item in items.items],
@@ -474,9 +486,13 @@ def public_export(db: Session = Depends(get_db), source_id: str | None = None, l
     }
 
 
-def _public_item(item: NormalizedItem) -> PublicItem:
+def _public_item(item: NormalizedItem, *, include_body: bool = True) -> PublicItem:
     source = item.source
-    fresh_location_hints = infer_location_candidates(item.title, item.body or item.summary)
+    fresh_location_hints = (
+        infer_location_candidates(item.title, item.body or item.summary)
+        if include_body
+        else []
+    )
     stored_location_hints = sanitize_location_hints(item.location_hints)
     combined_location_hints = fresh_location_hints + [
         hint
@@ -509,7 +525,7 @@ def _public_item(item: NormalizedItem) -> PublicItem:
         canonical_url=item.canonical_url,
         title=item.title,
         summary=item.summary,
-        body=item.body,
+        body=item.body if include_body else None,
         image_url=item.image_url,
         language=item.language,
         published_at=item.published_at,

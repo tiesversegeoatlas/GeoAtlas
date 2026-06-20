@@ -28,6 +28,15 @@ class Settings:
     ingest_item_pause_seconds: float = max(0, float(getenv("GEOATLAS_INGEST_ITEM_PAUSE_SECONDS", "0")))
     ingest_worker_count: int = max(1, int(getenv("GEOATLAS_INGEST_WORKER_COUNT", "1")))
     article_fetch_workers: int = max(1, min(8, int(getenv("GEOATLAS_ARTICLE_FETCH_WORKERS", "4"))))
+    scheduler_enabled: bool = getenv("GEOATLAS_SCHEDULER_ENABLED", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    scheduler_poll_seconds: int = max(10, int(getenv("GEOATLAS_SCHEDULER_POLL_SECONDS", "30")))
+    scheduler_max_pending_jobs: int = max(1, int(getenv("GEOATLAS_SCHEDULER_MAX_PENDING_JOBS", "2")))
+    scheduler_source_scan_limit: int = max(10, int(getenv("GEOATLAS_SCHEDULER_SOURCE_SCAN_LIMIT", "200")))
     article_enrichment_enabled: bool = getenv("GEOATLAS_ARTICLE_ENRICHMENT_ENABLED", "true").lower() in {
         "1",
         "true",

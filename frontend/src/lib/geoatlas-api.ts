@@ -107,8 +107,10 @@ async function request<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function fetchEvents(limit = 100): Promise<GeoEvent[]> {
-  const data = await request<BackendItemsResponse>(`/items?limit=${limit}`);
+export async function fetchEvents(limit = 40): Promise<GeoEvent[]> {
+  const data = await request<BackendItemsResponse>(
+    `/items?limit=${limit}&include_body=false`,
+  );
   return data.items.map(mapItem);
 }
 

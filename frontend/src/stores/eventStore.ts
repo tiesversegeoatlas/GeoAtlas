@@ -22,6 +22,14 @@ interface EventState {
 }
 
 let activeLoad: Promise<void> | null = null;
+let refreshTimer: number | null = null;
+
+function ensureAutoRefresh(loadEvents: (force?: boolean) => Promise<void>) {
+  if (typeof window === "undefined" || refreshTimer) return;
+  refreshTimer = window.setInterval(() => {
+    void loadEvents(true);
+  }, 60_000);
+}
 
 function searchEvents(events: GeoEvent[], query: string): GeoEvent[] {
   const normalized = query.trim().toLowerCase();
@@ -51,6 +59,7 @@ export const useEventStore = create<EventState>((set, get) => ({
           filteredEvents: searchEvents(events, get().searchQuery),
           loading: false,
         });
+        ensureAutoRefresh(get().loadEvents);
       })
       .catch((error: Error) => {
         set({ loading: false, error: error.message });

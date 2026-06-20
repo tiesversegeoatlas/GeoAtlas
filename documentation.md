@@ -40,6 +40,35 @@ Use this format:
 
 ## Work Log
 
+### 2026-06-20 - Fast Frontend Reads and Continuous Collection
+
+**Developer:** Codex
+
+**Goal:** Reduce frontend wait time and continuously collect newly published news without creating another high-load ingestion loop.
+
+**What changed:**
+- `backend/app/main.py`: Public item lists support `include_body=false`, skipping full article bodies and expensive body re-analysis while detail pages retain complete content.
+- `frontend/src/lib/geoatlas-api.ts`: Initial frontend loading now requests 40 compact records instead of 100 full articles.
+- `frontend/src/stores/eventStore.ts`: Live frontend data refreshes automatically every 60 seconds.
+- `backend/app/collection_scheduler.py`: Added a background scheduler that continuously finds due RSS and URL sources using their configured fetch intervals.
+- `backend/app/config.py`, `backend/.env.example`: Added scheduler enablement, poll interval, pending-job cap, and source-scan controls.
+- Continuous collection remains bounded to two queued/running jobs and the existing single ingestion worker, preserving low-impact PC behavior.
+
+**How to run or verify:**
+- Run `npm run dev` from `frontend`.
+- Check `GET /health` for `collection_scheduler.enabled: true`.
+- Inspect `GET /api/v1/public/items?limit=40&include_body=false`.
+- Run `python -m pytest -q` from `backend`.
+
+**Output or result:**
+- Frontend list views receive a much smaller response and render sooner.
+- Full article bodies remain available from individual item detail endpoints.
+- The backend keeps scheduling due sources while it is running without starting many ingestion workers in parallel.
+
+**Known issues or follow-ups:**
+- Continuous collection requires the backend process to remain running.
+- With thousands of due sources, the bounded scheduler intentionally works through them progressively to avoid PC lag.
+
 ### 2026-06-20 - Pixel-Matched GeoAtlas Home Dashboard
 
 **Developer:** Codex

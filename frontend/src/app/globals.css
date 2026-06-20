@@ -56,6 +56,7 @@
 }
 
 :root {
+  --font-sans: Inter, "Segoe UI", Arial, sans-serif;
   --background: #0B1120;
   --foreground: #F9FAFB;
   --card: #111827;
