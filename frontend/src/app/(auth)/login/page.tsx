@@ -43,7 +43,7 @@ export default function LoginPage() {
     toast.success("Authentication successful", {
       description: "Welcome back, Intelligence Operator."
     });
-    router.push("/dashboard");
+    router.push("/");
   }
 
   return (

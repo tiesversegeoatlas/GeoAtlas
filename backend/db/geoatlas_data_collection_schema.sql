@@ -13,6 +13,9 @@ create table if not exists external_sources (
   detected_language text,
   fetch_interval_minutes integer not null default 30,
   reliability_score numeric(4,3) not null default 0.700,
+  ai_credibility_score double precision,
+  ai_assessment_count integer not null default 0,
+  ai_assessed_at timestamptz,
   enabled boolean not null default true,
   archived boolean not null default false,
   status text not null default 'active',
@@ -107,6 +110,38 @@ create table if not exists event_candidates (
   created_at timestamptz not null default now()
 );
 
+create table if not exists ai_suggestions (
+  id uuid primary key default gen_random_uuid(),
+  normalized_item_id uuid not null references normalized_items(id),
+  event_candidate_id uuid references event_candidates(id),
+  suggestion_type text not null default 'event_analysis',
+  provider text not null,
+  model_name text not null,
+  prompt_version text not null,
+  input_hash text not null,
+  output_payload jsonb not null,
+  confidence double precision not null default 0,
+  status text not null default 'pending_review',
+  created_at timestamptz not null default now(),
+  constraint uq_ai_suggestion_cache unique (
+    normalized_item_id, input_hash, provider, model_name, prompt_version
+  )
+);
+
+create table if not exists ai_analysis_jobs (
+  id uuid primary key default gen_random_uuid(),
+  normalized_item_id uuid not null references normalized_items(id),
+  status text not null default 'queued',
+  provider text not null,
+  model_name text not null,
+  force boolean not null default false,
+  suggestion_id uuid references ai_suggestions(id),
+  error_message text,
+  started_at timestamptz,
+  finished_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists admin_api_keys (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -125,4 +160,7 @@ create index if not exists idx_normalized_status_published on normalized_items (
 create index if not exists idx_normalized_canonical_url on normalized_items (canonical_url);
 create index if not exists idx_normalized_title_trgm on normalized_items using gin (title gin_trgm_ops);
 create index if not exists idx_item_locations_geog on normalized_item_locations using gist (geog);
+create index if not exists idx_ai_jobs_status_created on ai_analysis_jobs (status, created_at);
+create index if not exists idx_ai_suggestions_item_created on ai_suggestions (normalized_item_id, created_at desc);
+create index if not exists idx_ai_suggestions_review_status on ai_suggestions (status, created_at desc);
 create index if not exists idx_admin_api_keys_active on admin_api_keys (active);

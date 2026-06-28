@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -28,6 +28,9 @@ class ExternalSource(Base):
     detected_language: Mapped[str | None] = mapped_column(String(32))
     fetch_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     reliability_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    ai_credibility_score: Mapped[float | None] = mapped_column(Float)
+    ai_assessment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_assessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
@@ -137,6 +140,96 @@ class EventCandidate(Base):
     risk_hint: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     publication_status: Mapped[str] = mapped_column(String(32), nullable=False, default="api_visible")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class AISuggestion(Base):
+    __tablename__ = "ai_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_item_id",
+            "input_hash",
+            "provider",
+            "model_name",
+            "prompt_version",
+            name="uq_ai_suggestion_cache",
+        ),
+        Index("idx_ai_suggestions_item_created", "normalized_item_id", "created_at"),
+        Index("idx_ai_suggestions_review_status", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=new_id)
+    normalized_item_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), ForeignKey("normalized_items.id"), nullable=False
+    )
+    event_candidate_id: Mapped[str | None] = mapped_column(
+        Uuid(as_uuid=False), ForeignKey("event_candidates.id")
+    )
+    suggestion_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="event_analysis"
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending_review"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class AIAnalysisJob(Base):
+    __tablename__ = "ai_analysis_jobs"
+    __table_args__ = (
+        Index("idx_ai_jobs_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=new_id)
+    normalized_item_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), ForeignKey("normalized_items.id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    force: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    suggestion_id: Mapped[str | None] = mapped_column(
+        Uuid(as_uuid=False), ForeignKey("ai_suggestions.id")
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class AIWorkerHeartbeat(Base):
+    __tablename__ = "ai_worker_heartbeats"
+    __table_args__ = (
+        Index("idx_ai_worker_heartbeat", "heartbeat_at"),
+    )
+
+    worker_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    worker_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    process_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    host_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="starting")
+    current_job_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False))
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cpu_percent: Mapped[float | None] = mapped_column(Float)
+    available_memory_gb: Mapped[float | None] = mapped_column(Float)
+    status_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
 
 
 class AdminApiKey(Base):

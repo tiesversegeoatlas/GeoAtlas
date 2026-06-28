@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .env
 backend/.env
+docs/LARGE_SCALE_HOSTING_GUIDE.md
 geoatlas_local.db
 backend/geoatlas_local.db
 *.sqlite

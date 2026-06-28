@@ -10,7 +10,7 @@ Technical reference documents:
 | [HLD.md](HLD.md) | High-level backend architecture and system context. |
 | [docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md](docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md) | Runnable GeoAtlas data collection implementation notes. |
 | [backend/db/geoatlas_data_collection_schema.sql](backend/db/geoatlas_data_collection_schema.sql) | Supabase Postgres + PostGIS schema for the data collection service. |
-| [docs/LARGE_SCALE_HOSTING_GUIDE.md](docs/LARGE_SCALE_HOSTING_GUIDE.md) | Production platform comparison, recommended AWS architecture, specifications, costs, and upgrade roadmap. |
+| [docs/AI_PIPELINE.md](docs/AI_PIPELINE.md) | Provider-independent, review-only AI analysis pipeline, configuration, database tables, and admin APIs. |
 
 ## How To Add An Entry
 
@@ -933,3 +933,109 @@ Scheduled RSS cycles prioritize freshness and store feed-provided titles,
 summaries, images, dates, categories, and inferred locations immediately.
 Manual ingestion and URL-source collection retain full article-page and
 headless-browser enrichment.
+# Single-Page GeoAtlas Command Center
+
+The frontend now uses `/` as the single operational product surface. Legacy
+`/dashboard`, `/feed`, `/map`, and `/events/[id]` routes and their obsolete
+components were removed. Sidebar navigation scrolls and filters the root
+command center; search, risk/category/location filters, workspaces, map layers,
+map zoom/reset/fullscreen, live pause, notifications, saved events, country
+tabs, reports, and event details now operate directly on the page.
+
+# Country Profile Experience
+
+The `Country Profiles` navigation item now opens a dedicated country-intelligence
+surface inside the main command-center theme. Profiles are generated from live
+events with ISO country codes and include current intelligence, risk metrics,
+confidence, source details, category coverage, and links to event details.
+
+Country flags are served from local SVG assets under `frontend/public/flags`,
+so they do not depend on a third-party image request while the application is
+running. Country silhouettes are rendered from the public-domain Natural Earth
+50m country dataset in `frontend/public/countries.geojson`. India uses a
+simplified local SVG path derived from Bhuvan/NRSC's official
+`admin.india_state` vector-tile layer.
+
+# Routed Intelligence and Real Risk Analytics
+
+The frontend now exposes `/news`, `/live-map`, and `/events/[id]`. The news
+route reads the latest 50 database records first and can continue through older
+records with offset pagination. Every news row and map event links to a
+dedicated event page containing the full collected body, source, location,
+confidence, urgency, importance, verification status, and AI risk score.
+
+The geopolitical risk index no longer uses a decorative filled polygon. It is
+an unfilled line chart calculated from collected event timestamps and
+`risk_score` values. Its category bars are averages of the same real event
+scores. The public items response now includes `total`, `offset`, `limit`, and
+`next_cursor` for complete database navigation.
+
+The News & Intelligence page also lists every enabled public feed with its
+credibility tier and score. It checks the first database page every 60 seconds,
+merges newly collected records at the top without discarding already loaded
+history, and retains the older-news control until the full database can be
+traversed.
+
+Both the dashboard map and the dedicated Live Map overlay the same
+Bhuvan/NRSC-derived India outline used by the country profile.
+
+The map now renders a real geographic outline layer for all 242 countries from
+`frontend/public/map-countries.geojson`. Its India feature is replaced with a
+longitude/latitude geometry assembled from Bhuvan/NRSC state-boundary vector
+tiles, so India is positioned geographically rather than as a floating SVG.
+Country profiles read the same combined boundary file.
+Both renderers validate that India is tagged
+`Bhuvan NRSC admin.india_state`; they fail boundary loading instead of silently
+substituting Natural Earth geometry when that official India feature is absent.
+On the map, all other countries are painted first and the Bhuvan India feature
+is painted last using the identical style. This prevents overlapping Pakistan
+or China polygons from clipping the northern Bhuvan outline without visually
+highlighting India.
+
+All frontend event timestamps are normalized as UTC when the backend value has
+no explicit offset, then formatted through the browser's resolved timezone.
+News, event details, country profiles, reports, relative feed times, chart
+times, and the navigation clock therefore follow the user's system timezone.
+
+The AI provider layer supports native local Ollama testing through `/api/chat`
+with the same strict event-analysis JSON schema used by hosted providers.
+Ollama does not require an API key and can be selected independently from
+production provider settings.
+
+Automatic Ollama analysis is enabled for newly normalized records in the local
+environment. Jobs are queued during ingestion and processed sequentially to
+avoid saturating the workstation. Public news output exposes `ai_applied`,
+`ai_provider`, `ai_model`, `ai_confidence`, and `ai_enriched_fields`; the
+frontend marks applied records and shows provider/confidence details.
+Low-confidence completed analyses appear as `AI analyzed` and remain pending
+review; only approved or sufficiently confident suggestions appear as
+`AI enriched` and affect display fallback fields.
+
+The one-time `python -m app.ai_backfill queue` command durably queues every
+record without a matching Ollama suggestion and can safely be rerun. Completed
+article assessments produce a separate per-source AI credibility score based
+on claim quality, confidence, verification status, and evidence. Public source
+ranking blends this AI score at a sample-size-dependent weight capped at 35%,
+preserving the configured editorial reliability score and operational health
+signals.
+
+AI text and location fallbacks are field-specific. Grounded summaries and
+missing-body reconstructions require at least 0.65 confidence and may only
+restate collected source text. AI locations require at least 0.78 confidence
+plus a country code or geocoded coordinates; otherwise the UI keeps
+`Location unconfirmed`. Event pages display the body first and a separately
+labeled AI summary afterward.
+India uses the same map stroke, opacity, transparent fill, and visual weight as
+every other country; only its underlying boundary source differs.
+
+The geographic country layer uses an opaque land-color fill before drawing its
+unified strokes. This covers political borders baked into the raster basemap,
+making GeoAtlas's 242-country boundary dataset the visible authoritative layer.
+
+The homepage Global Overview and Geopolitical Risk Index now use
+`GET /api/v1/public/overview`. This endpoint aggregates every normalized item
+belonging to an enabled, non-archived source rather than calculating totals
+from the 40 records loaded for the visible dashboard feed. It returns the full
+news count, high-risk count, affected-country count, policy-event count,
+database-wide risk average, 30-day trend, and category breakdown. The frontend
+refreshes these aggregates every 60 seconds.

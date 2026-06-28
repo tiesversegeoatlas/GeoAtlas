@@ -18,6 +18,7 @@ const state = {
   healthStopRequested: false,
   bulkCollecting: false,
   bulkStopRequested: false,
+  aiProgressTimer: null,
   sourcePagination: {
     offset: 0,
     limit: 25,
@@ -78,6 +79,20 @@ const els = {
   sourceHealthWorking: document.querySelector("#sourceHealthWorking"),
   sourceHealthFailing: document.querySelector("#sourceHealthFailing"),
   sourceHealthRemaining: document.querySelector("#sourceHealthRemaining"),
+  aiWorkerState: document.querySelector("#aiWorkerState"),
+  refreshAiProgress: document.querySelector("#refreshAiProgress"),
+  aiProgressSummary: document.querySelector("#aiProgressSummary"),
+  aiProgressPercent: document.querySelector("#aiProgressPercent"),
+  aiProgressFill: document.querySelector("#aiProgressFill"),
+  aiAnalyzedItems: document.querySelector("#aiAnalyzedItems"),
+  aiRemainingItems: document.querySelector("#aiRemainingItems"),
+  aiQueuedJobs: document.querySelector("#aiQueuedJobs"),
+  aiActiveJobs: document.querySelector("#aiActiveJobs"),
+  aiSuccessfulJobs: document.querySelector("#aiSuccessfulJobs"),
+  aiFailedJobs: document.querySelector("#aiFailedJobs"),
+  aiRankedSources: document.querySelector("#aiRankedSources"),
+  aiProgressMeta: document.querySelector("#aiProgressMeta"),
+  aiWorkerGrid: document.querySelector("#aiWorkerGrid"),
 };
 
 const savedKey = localStorage.getItem("geoAtlasAdminKey");
@@ -201,12 +216,92 @@ async function checkHealth() {
   }
 }
 
+function renderAiProgress(data) {
+  const liveWorkers = data.workers.filter(
+    (worker) => !["offline", "stopped", "drained"].includes(worker.status)
+  );
+  els.aiWorkerState.textContent = data.worker_status.replaceAll("_", " ");
+  els.aiWorkerState.className = `worker-state ${data.worker_status}`;
+  els.aiProgressSummary.textContent = `${data.analyzed_items.toLocaleString()} of ${data.total_items.toLocaleString()} news items analyzed`;
+  els.aiProgressPercent.textContent = `${data.progress_percent.toFixed(1)}%`;
+  els.aiProgressFill.style.width = `${Math.min(100, Math.max(0, data.progress_percent))}%`;
+  els.aiAnalyzedItems.textContent = data.analyzed_items.toLocaleString();
+  els.aiRemainingItems.textContent = data.remaining_items.toLocaleString();
+  els.aiQueuedJobs.textContent = data.queued_jobs.toLocaleString();
+  els.aiActiveJobs.textContent = `${liveWorkers.length.toLocaleString()}/${data.worker_capacity.toLocaleString()}`;
+  els.aiSuccessfulJobs.textContent = data.successful_jobs.toLocaleString();
+  els.aiFailedJobs.textContent = data.failed_jobs.toLocaleString();
+  els.aiRankedSources.textContent = `${data.ranked_sources.toLocaleString()}/${data.total_sources.toLocaleString()}`;
+  const lastCompleted = data.latest_completed_at ? formatDate(data.latest_completed_at) : "none yet";
+  els.aiProgressMeta.textContent = `${data.provider}/${data.model} · ${data.prompt_version} · ${data.worker_capacity} ${data.adaptive_workers ? "adaptive" : "fixed"} worker slots · automatic analysis ${data.auto_analyze ? "on" : "off"} · last completion ${lastCompleted}`;
+  renderAiWorkers(data.workers);
+}
+
+function renderAiWorkers(workers) {
+  if (!workers.length) {
+    els.aiWorkerGrid.innerHTML = `<div class="empty">No AI workers have registered yet.</div>`;
+    return;
+  }
+  els.aiWorkerGrid.innerHTML = workers.map((worker) => {
+    const memory = worker.available_memory_gb == null ? "n/a" : `${worker.available_memory_gb.toFixed(1)} GB free`;
+    const cpu = worker.cpu_percent == null ? "n/a" : `${worker.cpu_percent.toFixed(1)}% CPU`;
+    const job = worker.current_job_id ? `Job ${worker.current_job_id.slice(0, 8)}` : "No active job";
+    return `
+      <article class="ai-worker-card ${escapeHtml(worker.status)}">
+        <div class="ai-worker-card-head">
+          <div>
+            <strong>${escapeHtml(worker.worker_name)}</strong>
+            <small>PID ${worker.process_id} · ${escapeHtml(worker.host_name)}</small>
+          </div>
+          <span class="worker-state ${escapeHtml(worker.status)}">${escapeHtml(worker.status)}</span>
+        </div>
+        <div class="ai-worker-metrics">
+          <span><b>${worker.completed_count.toLocaleString()}</b> completed</span>
+          <span><b>${worker.failed_count.toLocaleString()}</b> failed</span>
+          <span><b>${escapeHtml(cpu)}</b></span>
+          <span><b>${escapeHtml(memory)}</b></span>
+        </div>
+        <p>${escapeHtml(worker.status_message || job)}</p>
+        <small>${escapeHtml(job)} · heartbeat ${escapeHtml(formatDate(worker.heartbeat_at))}</small>
+      </article>
+    `;
+  }).join("");
+}
+
+async function loadAiProgress({ quiet = false } = {}) {
+  if (!els.adminKey.value.trim()) {
+    els.aiWorkerState.textContent = "Waiting for admin key";
+    els.aiWorkerState.className = "worker-state waiting";
+    return;
+  }
+  try {
+    const data = await api("/api/v1/ai/progress", { headers: adminHeaders() });
+    renderAiProgress(data);
+  } catch (error) {
+    els.aiWorkerState.textContent = "Unavailable";
+    els.aiWorkerState.className = "worker-state error";
+    if (!quiet) showMessage(error.message, "bad");
+  }
+}
+
+function startAiProgressPolling() {
+  window.clearInterval(state.aiProgressTimer);
+  loadAiProgress({ quiet: true });
+  state.aiProgressTimer = window.setInterval(
+    () => loadAiProgress({ quiet: true }),
+    5000
+  );
+}
+
 els.toggleKey.addEventListener("click", () => {
   const showing = els.adminKey.type === "text";
   els.adminKey.type = showing ? "password" : "text";
   els.toggleKey.textContent = showing ? "Show" : "Hide";
   els.toggleKey.setAttribute("aria-label", showing ? "Show admin key" : "Hide admin key");
 });
+
+els.adminKey.addEventListener("change", startAiProgressPolling);
+els.refreshAiProgress.addEventListener("click", () => loadAiProgress());
 
 els.detectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1332,6 +1427,7 @@ async function runBulkCollection(connectorType) {
 }
 
 checkHealth();
+startAiProgressPolling();
 loadSources();
 loadOutputSources();
 loadOutput();

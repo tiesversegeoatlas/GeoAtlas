@@ -16,15 +16,19 @@ import { useEventStore } from "@/stores/eventStore";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
+import { userTimeZone } from "@/lib/date-time";
 
 export function TopNavbar() {
   const { setSearchQuery, events, loading, error, loadEvents } = useEventStore();
   const [time, setTime] = useState<Date | null>(null);
+  const [timezone, setTimezone] = useState("Local time");
   const pathname = usePathname();
   const hasSidebar = pathname !== "/" && pathname !== "/login" && pathname !== "/register";
 
   useEffect(() => {
     void loadEvents();
+    setTimezone(userTimeZone());
+    setTime(new Date());
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, [loadEvents]);
@@ -47,10 +51,10 @@ export function TopNavbar() {
       <div className="flex items-center gap-4">
         <div className="hidden lg:flex items-center gap-6 mr-6 border-r border-border pr-6">
           <div className="flex flex-col items-end">
-            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest leading-none mb-1">Current UTC Time</span>
+            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest leading-none mb-1">{timezone}</span>
             <div className="flex items-center gap-2 text-sm font-mono font-bold text-primary">
               <Clock className="w-3.5 h-3.5" />
-              {time ? time.toLocaleTimeString("en-US", { hour12: false, timeZone: "UTC" }) : "--:--:--"}
+              {time ? time.toLocaleTimeString(undefined, { hour12: false }) : "--:--:--"}
             </div>
           </div>
 

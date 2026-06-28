@@ -35,6 +35,11 @@ export interface GeoEvent {
   longitude: number;
   category: EventCategory;
   riskLevel: RiskLevel;
+  riskScore: number;
+  urgencyScore: number;
+  importanceScore: number;
+  isBreaking: boolean;
+  breakingReason?: string;
   verificationStatus: VerificationStatus;
   timestamp: string;
   lastUpdated: string;
@@ -45,6 +50,51 @@ export interface GeoEvent {
   imageUrl?: string;
   canonicalUrl?: string;
   sourceId?: string;
+  aiApplied: boolean;
+  aiProvider?: string;
+  aiModel?: string;
+  aiConfidence?: number;
+  aiStatus?: string;
+  aiEnrichedFields: string[];
+  aiSummary?: string;
+  aiGeneratedContent?: string;
+  aiLocation?: {
+    name: string;
+    countryCode?: string;
+    latitude?: number;
+    longitude?: number;
+    confidence?: number;
+  };
+}
+
+export interface EventPage {
+  events: GeoEvent[];
+  total: number;
+  offset: number;
+  limit: number;
+  nextOffset: number | null;
+}
+
+export interface NewsSource {
+  id: string;
+  name: string;
+  feedUrl: string;
+  siteUrl?: string;
+  credibilityScore: number;
+  credibilityTier: string;
+  aiCredibilityScore?: number;
+  aiAssessmentCount: number;
+}
+
+export interface OverviewAnalytics {
+  totalNews: number;
+  highRiskEvents: number;
+  countriesAffected: number;
+  policyEvents: number;
+  overallRisk: number;
+  timeline: Array<{ date: string; label: string; risk: number; events: number }>;
+  breakdown: Array<{ label: string; value: number; count: number }>;
+  generatedAt: string;
 }
 
 export interface CountryProfile {

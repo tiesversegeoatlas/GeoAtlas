@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GeoAtlas Source Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260618-health-cleaner" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260621-ai-progress" />
   </head>
   <body>
     <main class="shell">
@@ -120,6 +120,39 @@
         </section>
       </section>
 
+      <section class="panel ai-progress-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>AI analysis workers</h2>
+            <p>Live Ollama enrichment and source-ranking progress.</p>
+          </div>
+          <div class="button-group">
+            <span class="worker-state waiting" id="aiWorkerState">Waiting for admin key</span>
+            <button type="button" id="refreshAiProgress">Refresh</button>
+          </div>
+        </div>
+        <div class="ai-progress-row">
+          <span id="aiProgressSummary">Enter the admin key to load AI progress.</span>
+          <span id="aiProgressPercent">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div class="progress-fill ai-progress-fill" id="aiProgressFill"></div>
+        </div>
+        <div class="ai-progress-stats">
+          <span><strong id="aiAnalyzedItems">0</strong> analyzed</span>
+          <span><strong id="aiRemainingItems">0</strong> remaining</span>
+          <span><strong id="aiQueuedJobs">0</strong> queued</span>
+          <span><strong id="aiActiveJobs">0/3</strong> active / capacity</span>
+          <span class="health-stat-good"><strong id="aiSuccessfulJobs">0</strong> successful jobs</span>
+          <span class="health-stat-bad"><strong id="aiFailedJobs">0</strong> failed</span>
+          <span><strong id="aiRankedSources">0</strong> sources ranked</span>
+        </div>
+        <p class="ai-progress-meta" id="aiProgressMeta">Provider and completion details will appear here.</p>
+        <div class="ai-worker-grid" id="aiWorkerGrid">
+          <div class="empty">Worker details will appear after the admin key is entered.</div>
+        </div>
+      </section>
+
       <section class="workspace lower">
         <section class="panel">
           <div class="panel-heading">
@@ -206,6 +239,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260620-fast-output"></script>
+    <script src="/static/app.js?v=20260621-ai-progress"></script>
   </body>
 </html>

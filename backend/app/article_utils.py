@@ -82,12 +82,22 @@ PLACE_DATA = {
     "gaza": ("Gaza", "PS", 31.5017, 34.4668),
     "israel": ("Israel", "IL", 31.0461, 34.8516),
     "iran": ("Iran", "IR", 32.4279, 53.688),
+    "iranian": ("Iran", "IR", 32.4279, 53.688),
     "india": ("India", "IN", 20.5937, 78.9629),
+    "indian": ("India", "IN", 20.5937, 78.9629),
     "china": ("China", "CN", 35.8617, 104.1954),
+    "chinese": ("China", "CN", 35.8617, 104.1954),
+    "japan": ("Japan", "JP", 36.2048, 138.2529),
+    "japanese": ("Japan", "JP", 36.2048, 138.2529),
     "russia": ("Russia", "RU", 61.524, 105.3188),
+    "russian": ("Russia", "RU", 61.524, 105.3188),
     "ukraine": ("Ukraine", "UA", 48.3794, 31.1656),
+    "ukrainian": ("Ukraine", "UA", 48.3794, 31.1656),
+    "israeli": ("Israel", "IL", 31.0461, 34.8516),
     "united states": ("United States", "US", 37.0902, -95.7129),
+    "american": ("United States", "US", 37.0902, -95.7129),
     "united kingdom": ("United Kingdom", "GB", 55.3781, -3.436),
+    "british": ("United Kingdom", "GB", 55.3781, -3.436),
 }
 KNOWN_PLACES = set(PLACE_DATA)
 REJECTED_LOCATION_WORDS = MONTHS | {

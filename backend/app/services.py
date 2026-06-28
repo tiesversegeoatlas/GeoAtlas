@@ -31,7 +31,7 @@ from app.feed_utils import (
     safe_fetch,
 )
 from app.headless_search import HeadlessNewsSearcher
-from app.models import EventCandidate, ExternalSource, IngestionJob, NormalizedItem, NormalizedItemLocation, RawFetchedItem, new_id
+from app.models import AIAnalysisJob, EventCandidate, ExternalSource, IngestionJob, NormalizedItem, NormalizedItemLocation, RawFetchedItem, new_id
 
 NON_FEED_ERRORS = {
     "The URL did not return parseable RSS or Atom XML.",
@@ -496,6 +496,7 @@ def run_ingestion(
                 risk_hint=_risk_hint(category_hints),
             )
             db.add(candidate)
+            _queue_ai_analysis(db, normalized_id, settings)
             job.event_candidate_count += 1
             if new_items_processed % settings.ingest_commit_batch_size == 0:
                 db.commit()
@@ -645,6 +646,7 @@ def _store_url_scrape_results(
                 risk_hint=_risk_hint(category_hints),
             )
         )
+        _queue_ai_analysis(db, normalized_id, settings)
         job.normalized_count += 1
         job.event_candidate_count += 1
         processed += 1
@@ -661,6 +663,23 @@ def _risk_hint(categories: list[str]) -> str:
     if "natural_disaster" in categories:
         return "medium"
     return "unknown"
+
+
+def _queue_ai_analysis(db: Session, normalized_item_id: str, settings) -> None:
+    if not settings.ai_enabled or not settings.ai_auto_analyze:
+        return
+    db.add(
+        AIAnalysisJob(
+            normalized_item_id=normalized_item_id,
+            status="queued",
+            provider=settings.ai_provider,
+            model_name=(
+                "geoatlas-rules-v1"
+                if settings.ai_provider == "heuristic"
+                else settings.ai_model
+            ),
+        )
+    )
 
 
 def _prefetch_articles(items: list[dict], worker_count: int) -> dict[str, object]:

@@ -23,10 +23,10 @@ export function Footer() {
           <div>
             <h4 className="font-bold mb-4">Platform</h4>
             <ul className="space-y-2 text-sm text-muted-foreground">
-              <li><Link href="/feed" className="hover:text-primary">Live Feed</Link></li>
-              <li><Link href="/map" className="hover:text-primary">Global Map</Link></li>
-              <li><Link href="/dashboard" className="hover:text-primary">Analytics</Link></li>
-              <li><Link href="/reports" className="hover:text-primary">Reports</Link></li>
+              <li><Link href="/" className="hover:text-primary">Live Feed</Link></li>
+              <li><Link href="/" className="hover:text-primary">Global Map</Link></li>
+              <li><Link href="/" className="hover:text-primary">Analytics</Link></li>
+              <li><Link href="/" className="hover:text-primary">Reports</Link></li>
             </ul>
           </div>
 

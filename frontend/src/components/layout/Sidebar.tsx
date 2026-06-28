@@ -33,9 +33,9 @@ import { useEventStore } from "@/stores/eventStore";
 import { useEffect } from "react";
 
 const mainNavItems = [
-  { title: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
-  { title: "Live Feed", icon: Rss, href: "/feed" },
-  { title: "Global Map", icon: MapIcon, href: "/map" },
+  { title: "Overview", icon: LayoutDashboard, href: "/" },
+  { title: "Live Feed", icon: Rss, href: "/" },
+  { title: "Global Map", icon: MapIcon, href: "/" },
 ];
 
 const secondaryNavItems = [
@@ -54,7 +54,7 @@ export function AppSidebar() {
   const activeOpsItems = events.slice(0, 3).map((event) => ({
     title: event.title,
     risk: event.riskLevel,
-    href: `/events/${event.id}`,
+    href: "/",
   }));
 
   return (

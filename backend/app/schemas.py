@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -77,6 +78,9 @@ class SourceResponse(BaseModel):
     detected_language: str | None
     fetch_interval_minutes: int
     reliability_score: float
+    ai_credibility_score: float | None = None
+    ai_assessment_count: int = 0
+    ai_assessed_at: datetime | None = None
     enabled: bool
     archived: bool
     status: str
@@ -157,6 +161,10 @@ class PublicSource(BaseModel):
     feed_url: str
     site_url: str | None
     reliability_score: float
+    ai_credibility_score: float | None = None
+    ai_assessment_count: int = 0
+    credibility_score: float
+    credibility_tier: str
     last_success_at: datetime | None
 
 
@@ -166,6 +174,11 @@ class PublicLocation(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     confidence: float | None = None
+
+
+class PublicWebSource(BaseModel):
+    title: str
+    url: str
 
 
 class PublicItem(BaseModel):
@@ -183,11 +196,57 @@ class PublicItem(BaseModel):
     location_hints: list[dict] | None
     locations: list[PublicLocation]
     extraction_status: str
+    risk_level: str | None = None
+    risk_score: int | None = None
+    urgency_score: int | None = None
+    importance_score: int | None = None
+    claim_quality_score: int | None = None
+    is_breaking: bool = False
+    breaking_reason: str | None = None
+    credibility_score: float
+    rank_score: float
+    ai_enriched_fields: list[str] = Field(default_factory=list)
+    ai_applied: bool = False
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_confidence: float | None = None
+    ai_status: str | None = None
+    ai_summary: str | None = None
+    ai_generated_content: str | None = None
+    ai_location: PublicLocation | None = None
+    web_sources: list[PublicWebSource] = Field(default_factory=list)
 
 
 class PublicItemsResponse(BaseModel):
     items: list[PublicItem]
     next_cursor: str | None = None
+    total: int = 0
+    offset: int = 0
+    limit: int = 25
+
+
+class PublicRiskTimelinePoint(BaseModel):
+    date: str
+    label: str
+    risk: int
+    events: int
+
+
+class PublicRiskBreakdown(BaseModel):
+    label: str
+    value: int
+    count: int
+
+
+class PublicOverview(BaseModel):
+    total_news: int
+    high_risk_events: int
+    countries_affected: int
+    policy_events: int
+    overall_risk: int
+    timeline: list[PublicRiskTimelinePoint]
+    breakdown: list[PublicRiskBreakdown]
+    generated_at: datetime
 
 
 class PublicEvent(BaseModel):
@@ -203,3 +262,90 @@ class PublicEvent(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AIAnalyzeRequest(BaseModel):
+    item_ids: list[str] = Field(default_factory=list, max_length=100)
+    latest_limit: int = Field(default=0, ge=0, le=100)
+    force: bool = False
+
+
+class AIAnalysisJobResponse(BaseModel):
+    id: str
+    normalized_item_id: str
+    status: str
+    provider: str
+    model_name: str
+    force: bool
+    suggestion_id: str | None
+    error_message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AIAnalyzeResponse(BaseModel):
+    jobs: list[AIAnalysisJobResponse]
+
+
+class AIWorkerProgress(BaseModel):
+    worker_id: str
+    worker_name: str
+    slot: int
+    process_id: int
+    host_name: str
+    status: str
+    current_job_id: str | None = None
+    completed_count: int
+    failed_count: int
+    cpu_percent: float | None = None
+    available_memory_gb: float | None = None
+    status_message: str | None = None
+    started_at: datetime
+    heartbeat_at: datetime
+
+
+class AIProgressResponse(BaseModel):
+    enabled: bool
+    auto_analyze: bool
+    provider: str
+    model: str
+    prompt_version: str
+    worker_status: str
+    worker_capacity: int
+    adaptive_workers: bool
+    total_items: int
+    analyzed_items: int
+    remaining_items: int
+    progress_percent: float
+    queued_jobs: int
+    dispatched_jobs: int
+    running_jobs: int
+    successful_jobs: int
+    failed_jobs: int
+    ranked_sources: int
+    total_sources: int
+    latest_completed_at: datetime | None = None
+    workers: list[AIWorkerProgress]
+
+
+class AISuggestionResponse(BaseModel):
+    id: str
+    normalized_item_id: str
+    event_candidate_id: str | None
+    suggestion_type: str
+    provider: str
+    model_name: str
+    prompt_version: str
+    output_payload: dict
+    confidence: float
+    status: Literal["pending_review", "approved", "rejected"]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AIReviewRequest(BaseModel):
+    status: Literal["approved", "rejected"]
