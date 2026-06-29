@@ -151,6 +151,20 @@ create table if not exists admin_api_keys (
   last_used_at timestamptz
 );
 
+create table if not exists public_api_keys (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  key_prefix text not null,
+  key_hash text not null unique,
+  active boolean not null default true,
+  requests_per_minute integer not null default 60,
+  monthly_request_limit integer not null default 100000,
+  monthly_request_count integer not null default 0,
+  usage_month text not null default '',
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz
+);
+
 create index if not exists idx_sources_connector_enabled on external_sources (connector_type, enabled);
 create index if not exists idx_jobs_source_status_started on ingestion_jobs (source_id, status, started_at desc);
 create unique index if not exists uq_raw_source_item_id on raw_fetched_items (source_id, source_item_id) where source_item_id is not null;
@@ -164,3 +178,4 @@ create index if not exists idx_ai_jobs_status_created on ai_analysis_jobs (statu
 create index if not exists idx_ai_suggestions_item_created on ai_suggestions (normalized_item_id, created_at desc);
 create index if not exists idx_ai_suggestions_review_status on ai_suggestions (status, created_at desc);
 create index if not exists idx_admin_api_keys_active on admin_api_keys (active);
+create index if not exists idx_public_api_keys_active on public_api_keys (active);

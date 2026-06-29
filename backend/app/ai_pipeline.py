@@ -17,8 +17,9 @@ from sqlalchemy.orm import Session
 from app.article_utils import geocode_location
 from app.config import get_settings
 from app.models import AIAnalysisJob, AISuggestion, EventCandidate, ExternalSource, NormalizedItem
+from app.public_content import sanitize_public_text
 
-PROMPT_VERSION = "geoatlas-event-analysis-v12"
+PROMPT_VERSION = "geoatlas-event-analysis-v14"
 GENERATED_CONTENT_MIN_WORDS = 200
 GENERATED_CONTENT_MAX_WORDS = 200
 ALLOWED_CATEGORIES = {
@@ -621,10 +622,16 @@ def _normalize_analysis(
         min(1, result.confidence * 0.85 + float(source_reliability) * 0.15),
         3,
     )
+    result.summary = sanitize_public_text(result.summary)
     result.generated_content = _grounded_content(
         source_text,
         result.summary,
         generated=result.generated_content,
+    )
+    result.breaking_reason = (
+        sanitize_public_text(result.breaking_reason)
+        if result.breaking_reason
+        else None
     )
     return result
 
@@ -651,9 +658,16 @@ def _grounded_content(
     *,
     generated: str | None = None,
 ) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    generated_cleaned = re.sub(r"\s+", " ", generated or "").strip()
+    cleaned = re.sub(r"\s+", " ", sanitize_public_text(text)).strip()
+    generated_cleaned = re.sub(
+        r"\s+",
+        " ",
+        sanitize_public_text(generated),
+    ).strip()
+    summary = sanitize_public_text(summary)
     candidate = generated_cleaned or cleaned or summary
+    if not candidate:
+        candidate = "The report describes a developing event using the available source information."
     words = candidate.split()
     if len(words) >= GENERATED_CONTENT_MIN_WORDS:
         return " ".join(words[:GENERATED_CONTENT_MAX_WORDS])
@@ -666,6 +680,8 @@ def _grounded_content(
     ]
     result_words = re.sub(r"\s+", " ", " ".join(sections)).strip().split()
     limitation = (summary or candidate).split()
+    if not limitation:
+        limitation = candidate.split()
     while len(result_words) < GENERATED_CONTENT_MIN_WORDS:
         result_words.extend(limitation)
     return " ".join(result_words[:GENERATED_CONTENT_MAX_WORDS])
@@ -706,6 +722,9 @@ and official sources. The public summary and generated_content must not add
 facts obtained only from web search; they must remain grounded in ARTICLE.
 Set web_sources to an empty list; GeoAtlas stores the consulted URLs internally.
 summary must be a concise paraphrase of ARTICLE and must not add new facts.
+summary and generated_content must contain plain prose only. Never include raw
+URLs, Markdown links, parenthetical source links, citations, footnotes, source
+domain labels, tracking parameters, or supporting-source lists.
 Set location, country, country_code, latitude, and longitude to null unless the
 place is explicitly stated in ARTICLE or can be unambiguously resolved from an
 explicit place name. Never infer a location from the publisher's identity.
@@ -722,6 +741,9 @@ importance_score measures geopolitical/public impact and urgency.
 Set is_breaking true only for a genuinely time-sensitive, newly developing
 event that warrants immediate analyst attention. Do not mark routine reporting,
 analysis, opinion, scheduled events, recaps, or old developments as breaking.
+is_breaking may be true only when urgency_score is at least 60 and
+importance_score is at least 40. Planned activities and reassuring notices are
+not breaking unless the article reports an unexpected dangerous development.
 breaking_reason must briefly cite the article-grounded reason for that decision
 when is_breaking is true, otherwise it must be null.
 claim_quality_score measures how well the article supports its own claims.

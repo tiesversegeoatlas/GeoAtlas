@@ -27,7 +27,7 @@ export default function EventPage() {
       <article className="atlas-card atlas-event-page">
         <header>
           <div>
-            <span className={`atlas-event-page-risk ${event.riskLevel}`}>{event.riskLevel} risk · {event.riskScore}/100</span>
+            <span className={`atlas-event-page-risk ${event.riskLevel}`}>{event.isBreaking ? "BREAKING · " : ""}{event.riskLevel} risk · {event.riskScore}/100</span>
             <h1>{event.title}</h1>
             <p>{formatUserDateTime(event.timestamp)} · {event.sources[0]?.name} · {userTimeZone()}</p>
           </div>

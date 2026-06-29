@@ -233,16 +233,16 @@ function renderAiProgress(data) {
   els.aiFailedJobs.textContent = data.failed_jobs.toLocaleString();
   els.aiRankedSources.textContent = `${data.ranked_sources.toLocaleString()}/${data.total_sources.toLocaleString()}`;
   const lastCompleted = data.latest_completed_at ? formatDate(data.latest_completed_at) : "none yet";
-  els.aiProgressMeta.textContent = `${data.provider}/${data.model} · ${data.prompt_version} · ${data.worker_capacity} ${data.adaptive_workers ? "adaptive" : "fixed"} worker slots · automatic analysis ${data.auto_analyze ? "on" : "off"} · last completion ${lastCompleted}`;
+  els.aiProgressMeta.textContent = `${data.worker_capacity} ${data.adaptive_workers ? "adaptive" : "fixed"} processing slots · automatic processing ${data.auto_analyze ? "on" : "off"} · last completion ${lastCompleted}`;
   renderAiWorkers(data.workers);
 }
 
 function renderAiWorkers(workers) {
   if (!workers.length) {
-    els.aiWorkerGrid.innerHTML = `<div class="empty">No AI workers have registered yet.</div>`;
+    els.aiWorkerGrid.innerHTML = `<div class="empty">No processing workers have registered yet.</div>`;
     return;
   }
-  els.aiWorkerGrid.innerHTML = workers.map((worker) => {
+  els.aiWorkerGrid.innerHTML = workers.map((worker, index) => {
     const memory = worker.available_memory_gb == null ? "n/a" : `${worker.available_memory_gb.toFixed(1)} GB free`;
     const cpu = worker.cpu_percent == null ? "n/a" : `${worker.cpu_percent.toFixed(1)}% CPU`;
     const job = worker.current_job_id ? `Job ${worker.current_job_id.slice(0, 8)}` : "No active job";
@@ -250,7 +250,7 @@ function renderAiWorkers(workers) {
       <article class="ai-worker-card ${escapeHtml(worker.status)}">
         <div class="ai-worker-card-head">
           <div>
-            <strong>${escapeHtml(worker.worker_name)}</strong>
+            <strong>Processing worker ${index + 1}</strong>
             <small>PID ${worker.process_id} · ${escapeHtml(worker.host_name)}</small>
           </div>
           <span class="worker-state ${escapeHtml(worker.status)}">${escapeHtml(worker.status)}</span>

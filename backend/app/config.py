@@ -8,10 +8,39 @@ load_dotenv()
 
 class Settings:
     database_url: str = getenv("DATABASE_URL", "sqlite:///./geoatlas_local.db")
+    db_pool_size: int = max(1, int(getenv("GEOATLAS_DB_POOL_SIZE", "5")))
+    db_max_overflow: int = max(0, int(getenv("GEOATLAS_DB_MAX_OVERFLOW", "0")))
+    db_pool_timeout_seconds: int = max(
+        1, int(getenv("GEOATLAS_DB_POOL_TIMEOUT_SECONDS", "10"))
+    )
+    db_pool_recycle_seconds: int = max(
+        30, int(getenv("GEOATLAS_DB_POOL_RECYCLE_SECONDS", "1800"))
+    )
+    db_pool_pre_ping: bool = getenv("GEOATLAS_DB_POOL_PRE_PING", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    db_pool_use_lifo: bool = getenv("GEOATLAS_DB_POOL_USE_LIFO", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     supabase_url: str | None = getenv("SUPABASE_URL")
     supabase_anon_key: str | None = getenv("SUPABASE_ANON_KEY")
     supabase_service_role_key: str | None = getenv("SUPABASE_SERVICE_ROLE_KEY")
     public_base_url: str = getenv("GEOATLAS_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+    public_api_auth_required: bool = getenv(
+        "GEOATLAS_PUBLIC_API_AUTH_REQUIRED", "false"
+    ).lower() in {"1", "true", "yes", "on"}
+    public_api_default_rpm: int = max(
+        1, int(getenv("GEOATLAS_PUBLIC_API_DEFAULT_RPM", "60"))
+    )
+    public_api_default_monthly_limit: int = max(
+        1, int(getenv("GEOATLAS_PUBLIC_API_DEFAULT_MONTHLY_LIMIT", "100000"))
+    )
     admin_cors_origins: list[str] = [
         origin.strip()
         for origin in getenv(
@@ -96,6 +125,12 @@ class Settings:
         "yes",
         "on",
     }
+    ai_new_items_only: bool = getenv(
+        "GEOATLAS_AI_NEW_ITEMS_ONLY", "true"
+    ).lower() in {"1", "true", "yes", "on"}
+    ai_new_item_max_age_hours: int = max(
+        1, min(168, int(getenv("GEOATLAS_AI_NEW_ITEM_MAX_AGE_HOURS", "24")))
+    )
     ai_scheduler_poll_seconds: int = max(
         2, int(getenv("GEOATLAS_AI_SCHEDULER_POLL_SECONDS", "5"))
     )
@@ -108,28 +143,6 @@ class Settings:
         "yes",
         "on",
     }
-    ai_backfill_worker_count: int = max(
-        1, min(3, int(getenv("GEOATLAS_AI_BACKFILL_WORKER_COUNT", "1")))
-    )
-    ai_adaptive_workers: bool = getenv(
-        "GEOATLAS_AI_ADAPTIVE_WORKERS", "true"
-    ).lower() in {"1", "true", "yes", "on"}
-    ai_worker_max_cpu_percent: float = max(
-        40.0,
-        min(95.0, float(getenv("GEOATLAS_AI_WORKER_MAX_CPU_PERCENT", "80"))),
-    )
-    ai_worker_min_free_memory_gb: float = max(
-        1.0, float(getenv("GEOATLAS_AI_WORKER_MIN_FREE_MEMORY_GB", "2.0"))
-    )
-    ai_aux_worker_memory_step_gb: float = max(
-        0.5, float(getenv("GEOATLAS_AI_AUX_WORKER_MEMORY_STEP_GB", "1.5"))
-    )
-    ai_resource_check_seconds: int = max(
-        2, int(getenv("GEOATLAS_AI_RESOURCE_CHECK_SECONDS", "5"))
-    )
-    ai_backfill_job_pause_seconds: float = max(
-        0.0, float(getenv("GEOATLAS_AI_BACKFILL_JOB_PAUSE_SECONDS", "0.25"))
-    )
 
 
 @lru_cache

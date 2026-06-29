@@ -2,13 +2,16 @@ from pathlib import Path
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import case, delete, desc, func, or_, select
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy import case, delete, desc, exists, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.admin_keys import validate_admin_key
@@ -34,6 +37,12 @@ from app.models import (
     NormalizedItemLocation,
     RawFetchedItem,
 )
+from app.public_api_keys import require_public_api_key
+from app.public_content import (
+    public_location_hint,
+    sanitize_public_text,
+    sanitize_public_url,
+)
 from app.schemas import (
     AIAnalysisJobResponse,
     AIAnalyzeRequest,
@@ -51,7 +60,6 @@ from app.schemas import (
     PublicLocation,
     PublicOverview,
     PublicSource,
-    PublicWebSource,
     SourceBulkImportRequest,
     SourceBulkImportResponse,
     SourceCreate,
@@ -68,9 +76,14 @@ from app.services import bulk_create_sources, check_source_health, create_ingest
 settings = get_settings()
 
 app = FastAPI(
-    title="GeoAtlas Data Collection API",
-    description="Standalone RSS/Atom source collection and public output API for GeoAtlas.",
-    version="0.2.0",
+    title="GeoAtlas Intelligence API",
+    description="Independent, versioned global news and risk-intelligence API.",
+    version="1.0.0",
+    contact={"name": "GeoAtlas API Support"},
+    license_info={"name": "Commercial"},
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
@@ -79,11 +92,82 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Total-Count", "X-Limit", "X-Offset"],
+    expose_headers=[
+        "X-Total-Count",
+        "X-Limit",
+        "X-Offset",
+        "X-Request-ID",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-Monthly-Limit",
+        "X-Monthly-Remaining",
+        "Retry-After",
+    ],
 )
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def database_error_detail(exc: SQLAlchemyError) -> str:
+    message = str(exc).lower()
+    if isinstance(exc, OperationalError) and (
+        "max clients reached" in message
+        or "too many clients" in message
+        or "emaxconnsession" in message
+    ):
+        return "Database is temporarily busy. Please retry shortly."
+    return "Database is temporarily unavailable."
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def public_openapi_schema() -> JSONResponse:
+    public_paths = {
+        "/health",
+        "/ready",
+        "/api/v1",
+    }
+    public_routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api/v1/public/")
+        or getattr(route, "path", "") in public_paths
+    ]
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=public_routes,
+    )
+    return JSONResponse(schema)
+
+
+@app.get("/docs", include_in_schema=False)
+def public_api_docs():
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{app.title} - API documentation",
+    )
+
+
+@app.middleware("http")
+async def add_api_headers(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    try:
+        response = await call_next(request)
+    except SQLAlchemyError as exc:
+        response = JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": database_error_detail(exc)},
+        )
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith("/api/v1/public/"):
+        response.headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=120"
+    return response
 
 
 @app.on_event("startup")
@@ -181,14 +265,28 @@ def health(db: Session = Depends(get_db)) -> dict:
             "max_pending_jobs": settings.scheduler_max_pending_jobs,
             "job_timeout_seconds": settings.scheduler_job_timeout_seconds,
         },
-        "ai": {
-            "enabled": settings.ai_enabled,
-            "provider": settings.ai_provider,
-            "model": settings.ai_model,
-            "api_key_configured": bool(settings.ai_api_key),
-            "worker_count": settings.ai_worker_count,
-            "auto_analyze": settings.ai_auto_analyze,
-        },
+    }
+
+
+@app.get("/ready")
+def readiness(db: Session = Depends(get_db)) -> dict:
+    try:
+        db.execute(select(1))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Database is not ready.") from exc
+    return {"status": "ready", "service": "geoatlas-intelligence-api", "version": app.version}
+
+
+@app.get("/api/v1", tags=["service"])
+def service_manifest() -> dict:
+    return {
+        "service": "GeoAtlas Intelligence API",
+        "version": app.version,
+        "documentation": "/docs",
+        "openapi": "/openapi.json",
+        "health": "/health",
+        "readiness": "/ready",
+        "authentication": "X-API-Key or Authorization: Bearer",
     }
 
 
@@ -642,8 +740,8 @@ def _ai_progress(db: Session) -> dict:
         "model": settings.ai_model,
         "prompt_version": PROMPT_VERSION,
         "worker_status": worker_status,
-        "worker_capacity": settings.ai_backfill_worker_count,
-        "adaptive_workers": settings.ai_adaptive_workers,
+        "worker_capacity": settings.ai_worker_count,
+        "adaptive_workers": False,
         "total_items": total_items,
         "analyzed_items": analyzed_items,
         "remaining_items": remaining_items,
@@ -660,7 +758,7 @@ def _ai_progress(db: Session) -> dict:
     }
 
 
-@app.get("/api/v1/public/sources", response_model=list[PublicSource])
+@app.get("/api/v1/public/sources", response_model=list[PublicSource], dependencies=[Depends(require_public_api_key)])
 def public_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
     sources = list(db.scalars(
         select(ExternalSource)
@@ -672,11 +770,8 @@ def public_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
         PublicSource(
             id=source.id,
             name=source.name,
-            feed_url=source.feed_url,
-            site_url=source.site_url,
-            reliability_score=source.reliability_score,
-            ai_credibility_score=source.ai_credibility_score,
-            ai_assessment_count=source.ai_assessment_count,
+            feed_url=sanitize_public_url(source.feed_url) or source.feed_url,
+            site_url=sanitize_public_url(source.site_url),
             credibility_score=_source_credibility_score(source),
             credibility_tier=_credibility_tier(_source_credibility_score(source)),
             last_success_at=source.last_success_at,
@@ -685,7 +780,7 @@ def public_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
     ]
 
 
-@app.get("/api/v1/public/output-sources", response_model=list[PublicSource])
+@app.get("/api/v1/public/output-sources", response_model=list[PublicSource], dependencies=[Depends(require_public_api_key)])
 def public_output_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
     sources = list(db.scalars(
         select(ExternalSource)
@@ -699,11 +794,8 @@ def public_output_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
         PublicSource(
             id=source.id,
             name=source.name,
-            feed_url=source.feed_url,
-            site_url=source.site_url,
-            reliability_score=source.reliability_score,
-            ai_credibility_score=source.ai_credibility_score,
-            ai_assessment_count=source.ai_assessment_count,
+            feed_url=sanitize_public_url(source.feed_url) or source.feed_url,
+            site_url=sanitize_public_url(source.site_url),
             credibility_score=_source_credibility_score(source),
             credibility_tier=_credibility_tier(_source_credibility_score(source)),
             last_success_at=source.last_success_at,
@@ -712,7 +804,7 @@ def public_output_sources(db: Session = Depends(get_db)) -> list[PublicSource]:
     ]
 
 
-@app.get("/api/v1/public/items", response_model=PublicItemsResponse)
+@app.get("/api/v1/public/items", response_model=PublicItemsResponse, dependencies=[Depends(require_public_api_key)])
 def public_items(
     db: Session = Depends(get_db),
     source_id: str | None = None,
@@ -720,8 +812,20 @@ def public_items(
     offset: Annotated[int, Query(ge=0)] = 0,
     include_body: bool = True,
     deduplicate: bool = True,
+    since_hours: Annotated[int | None, Query(ge=1, le=168)] = None,
 ) -> PublicItemsResponse:
-    candidate_limit = max((offset + limit) * 10, 500) if deduplicate else limit
+    settings = get_settings()
+    require_ai_publication = bool(settings.ai_enabled and settings.ai_auto_analyze)
+    candidate_limit = (
+        min(max((offset + limit) * 5, 250), 500)
+        if deduplicate
+        else limit
+    )
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        if since_hours is not None
+        else None
+    )
     statement = (
         select(NormalizedItem)
         .join(NormalizedItem.source)
@@ -734,36 +838,55 @@ def public_items(
     )
     if source_id:
         statement = statement.where(NormalizedItem.source_id == source_id)
+    if cutoff is not None:
+        statement = statement.where(
+            func.coalesce(
+                NormalizedItem.published_at,
+                NormalizedItem.created_at,
+            ) >= cutoff
+        )
     statement = statement.limit(candidate_limit)
     if not deduplicate:
         statement = statement.offset(offset)
     candidates = list(db.scalars(statement))
     if deduplicate and not source_id:
-        credible_candidates = list(
-            db.scalars(
-                select(NormalizedItem)
-                .join(NormalizedItem.source)
-                .options(
-                    selectinload(NormalizedItem.source),
-                    selectinload(NormalizedItem.locations),
-                )
-                .where(
-                    ExternalSource.enabled.is_(True),
-                    ExternalSource.archived.is_(False),
-                )
-                .order_by(
-                    desc(ExternalSource.reliability_score),
-                    desc(NormalizedItem.published_at).nullslast(),
-                    desc(NormalizedItem.created_at),
-                )
-                .limit(candidate_limit)
+        credible_statement = (
+            select(NormalizedItem)
+            .join(NormalizedItem.source)
+            .options(
+                selectinload(NormalizedItem.source),
+                selectinload(NormalizedItem.locations),
             )
+            .where(
+                ExternalSource.enabled.is_(True),
+                ExternalSource.archived.is_(False),
+            )
+            .order_by(
+                desc(func.coalesce(
+                    ExternalSource.ai_credibility_score,
+                    ExternalSource.reliability_score * 100,
+                )),
+                desc(NormalizedItem.published_at).nullslast(),
+                desc(NormalizedItem.created_at),
+            )
+        )
+        if cutoff is not None:
+            credible_statement = credible_statement.where(
+                func.coalesce(
+                    NormalizedItem.published_at,
+                    NormalizedItem.created_at,
+                ) >= cutoff
+            )
+        credible_candidates = list(
+            db.scalars(credible_statement.limit(candidate_limit))
         )
         seen_ids = {item.id for item in candidates}
         candidates.extend(
             item for item in credible_candidates if item.id not in seen_ids
-        )
+    )
     suggestions = _preferred_ai_suggestions(db, [item.id for item in candidates])
+    if require_ai_publication:
+        candidates = [item for item in candidates if item.id in suggestions]
     items = (
         _deduplicate_items(candidates, suggestions)[offset:offset + limit]
         if deduplicate
@@ -776,6 +899,22 @@ def public_items(
     )
     if source_id:
         count_statement = count_statement.where(NormalizedItem.source_id == source_id)
+    if cutoff is not None:
+        count_statement = count_statement.where(
+            func.coalesce(
+                NormalizedItem.published_at,
+                NormalizedItem.created_at,
+            ) >= cutoff
+        )
+    if require_ai_publication:
+        count_statement = count_statement.where(
+            exists(
+                select(AISuggestion.id).where(
+                    AISuggestion.normalized_item_id == NormalizedItem.id,
+                    AISuggestion.status.in_(["approved", "pending_review"]),
+                )
+            )
+        )
     total = int(db.scalar(count_statement) or 0)
     next_offset = offset + len(items)
     return PublicItemsResponse(
@@ -794,16 +933,19 @@ def public_items(
     )
 
 
-@app.get("/api/v1/public/items/{item_id}", response_model=PublicItem)
+@app.get("/api/v1/public/items/{item_id}", response_model=PublicItem, dependencies=[Depends(require_public_api_key)])
 def public_item(item_id: str, db: Session = Depends(get_db)) -> PublicItem:
+    settings = get_settings()
     item = db.get(NormalizedItem, item_id)
     if not item or not item.source.enabled or item.source.archived:
         raise HTTPException(status_code=404, detail="Item not found.")
     suggestion = _preferred_ai_suggestions(db, [item.id]).get(item.id)
+    if settings.ai_enabled and settings.ai_auto_analyze and suggestion is None:
+        raise HTTPException(status_code=404, detail="Item not found.")
     return _public_item(item, include_body=True, suggestion=suggestion)
 
 
-@app.get("/api/v1/public/events", response_model=list[PublicEvent])
+@app.get("/api/v1/public/events", response_model=list[PublicEvent], dependencies=[Depends(require_public_api_key)])
 def public_events(
     db: Session = Depends(get_db),
     source_id: str | None = None,
@@ -811,7 +953,7 @@ def public_events(
     category: str | None = None,
     country_code: str | None = None,
     limit: int = Query(default=25, ge=1, le=100),
-) -> list[EventCandidate]:
+) -> list[PublicEvent]:
     candidate_limit = min(limit * 10, 1000)
     statement = (
         select(EventCandidate, ExternalSource.reliability_score)
@@ -823,7 +965,7 @@ def public_events(
     if source_id:
         statement = statement.where(EventCandidate.source_id == source_id)
     events = _deduplicate_events(list(db.execute(statement)))
-    return [
+    filtered_events = [
         event
         for event in events
         if event_matches_filters(
@@ -833,9 +975,27 @@ def public_events(
             country_code=country_code,
         )
     ][:limit]
+    return [
+        PublicEvent(
+            id=event.id,
+            source_id=event.source_id,
+            normalized_item_id=event.normalized_item_id,
+            title=sanitize_public_text(event.title) or "Untitled report",
+            summary=sanitize_public_text(event.summary) or None,
+            category_hints=event.category_hints,
+            location_hints=[
+                public_location_hint(hint)
+                for hint in sanitize_location_hints(event.location_hints)
+            ],
+            risk_hint=event.risk_hint,
+            publication_status=event.publication_status,
+            created_at=event.created_at,
+        )
+        for event in filtered_events
+    ]
 
 
-@app.get("/api/v1/public/statistics")
+@app.get("/api/v1/public/statistics", dependencies=[Depends(require_public_api_key)])
 def public_statistics(
     db: Session = Depends(get_db),
     source_id: str | None = None,
@@ -853,7 +1013,7 @@ def public_statistics(
     return generate_event_statistics(db.execute(statement))
 
 
-@app.get("/api/v1/public/overview", response_model=PublicOverview)
+@app.get("/api/v1/public/overview", response_model=PublicOverview, dependencies=[Depends(require_public_api_key)])
 def public_overview(db: Session = Depends(get_db)) -> PublicOverview:
     item_rows = list(
         db.execute(
@@ -970,7 +1130,7 @@ def public_overview(db: Session = Depends(get_db)) -> PublicOverview:
     )
 
 
-@app.get("/api/v1/public/export.json")
+@app.get("/api/v1/public/export.json", dependencies=[Depends(require_public_api_key)])
 def public_export(db: Session = Depends(get_db), source_id: str | None = None, limit: int = Query(default=100, ge=1, le=500)) -> dict:
     items = public_items(db=db, source_id=source_id, limit=limit, offset=0, include_body=True)
     events = public_events(db=db, source_id=source_id, limit=limit)
@@ -1001,20 +1161,20 @@ def _public_item(
         and ai_payload.get("risk_level")
     )
     ai_enriched_fields: list[str] = []
-    generated_summary = (
-        str(ai_payload.get("summary") or "").strip() if use_ai_text else ""
+    generated_summary = sanitize_public_text(
+        str(ai_payload.get("summary") or "") if use_ai_text else ""
     )
-    generated_content = (
-        str(ai_payload.get("generated_content") or "").strip()
+    generated_content = sanitize_public_text(
+        str(ai_payload.get("generated_content") or "")
         if use_ai_text
         else ""
     )
 
-    summary = generated_summary or item.summary
+    summary = sanitize_public_text(generated_summary or item.summary) or None
     if generated_summary:
         ai_enriched_fields.append("summary")
 
-    body = generated_content or item.body
+    body = sanitize_public_text(generated_content or item.body) or None
     if include_body and generated_content:
         ai_enriched_fields.append("body")
 
@@ -1069,6 +1229,10 @@ def _public_item(
             for hint in clean_location_hints
             if float(hint.get("confidence") or 0) >= top_confidence - 0.02
         ]
+    public_location_hints = [
+        public_location_hint(hint)
+        for hint in clean_location_hints
+    ]
     clean_coordinates = {
         (round(float(hint["latitude"]), 4), round(float(hint["longitude"]), 4))
         for hint in clean_location_hints
@@ -1171,25 +1335,22 @@ def _public_item(
         source=PublicSource(
             id=source.id,
             name=source.name,
-            feed_url=source.feed_url,
-            site_url=source.site_url,
-            reliability_score=source.reliability_score,
-            ai_credibility_score=source.ai_credibility_score,
-            ai_assessment_count=source.ai_assessment_count,
+            feed_url=sanitize_public_url(source.feed_url) or source.feed_url,
+            site_url=sanitize_public_url(source.site_url),
             credibility_score=credibility_score,
             credibility_tier=_credibility_tier(credibility_score),
             last_success_at=source.last_success_at,
         ),
-        canonical_url=item.canonical_url,
-        title=item.title,
+        canonical_url=sanitize_public_url(item.canonical_url),
+        title=sanitize_public_text(item.title) or "Untitled report",
         summary=summary,
         body=body if include_body else None,
-        image_url=item.image_url,
+        image_url=sanitize_public_url(item.image_url),
         language=item.language,
         published_at=item.published_at,
         collected_at=item.created_at,
         category_hints=category_hints,
-        location_hints=clean_location_hints,
+        location_hints=public_location_hints,
         locations=public_locations,
         extraction_status=item.extraction_status,
         risk_level=(
@@ -1205,33 +1366,6 @@ def _public_item(
         breaking_reason=breaking_reason,
         credibility_score=credibility_score,
         rank_score=_item_rank_score(item, suggestion),
-        ai_enriched_fields=list(dict.fromkeys(ai_enriched_fields)),
-        ai_applied=bool(ai_enriched_fields) or use_ai_risk,
-        ai_provider=suggestion.provider if suggestion else None,
-        ai_model=suggestion.model_name if suggestion else None,
-        ai_confidence=ai_confidence if suggestion else None,
-        ai_status=suggestion.status if suggestion else None,
-        ai_summary=generated_summary or None,
-        ai_generated_content=generated_content or None,
-        ai_location=(
-            PublicLocation(
-                name=str(ai_location_hints[0]["name"]),
-                country_code=ai_location_hints[0].get("country_code"),
-                latitude=ai_location_hints[0].get("latitude"),
-                longitude=ai_location_hints[0].get("longitude"),
-                confidence=ai_location_hints[0].get("confidence"),
-            )
-            if ai_location_hints
-            else None
-        ),
-        web_sources=[
-            PublicWebSource(
-                title=str(value.get("title") or value.get("url") or ""),
-                url=str(value.get("url") or ""),
-            )
-            for value in (ai_payload.get("web_sources") or [])
-            if isinstance(value, dict) and value.get("url")
-        ],
     )
 
 
@@ -1262,6 +1396,8 @@ def _preferred_ai_suggestions(
 
 
 def _source_credibility_score(source: ExternalSource) -> float:
+    if source.ai_credibility_score is not None and source.ai_assessment_count > 0:
+        return round(max(0, min(100, float(source.ai_credibility_score))), 1)
     score = float(source.reliability_score) * 100
     success = source.last_success_at
     failure = source.last_failure_at
@@ -1273,12 +1409,6 @@ def _source_credibility_score(source: ExternalSource) -> float:
         score -= 10
     elif source.status in {"active", "url"} and source.enabled:
         score += 2
-    if source.ai_credibility_score is not None and source.ai_assessment_count > 0:
-        sample_weight = min(0.35, 0.08 + source.ai_assessment_count * 0.027)
-        score = (
-            score * (1 - sample_weight)
-            + float(source.ai_credibility_score) * sample_weight
-        )
     return round(max(0, min(100, score)), 1)
 
 
@@ -1397,18 +1527,18 @@ def _breaking_reason(
     if ai_is_breaking is False:
         return None
     if ai_is_breaking is True:
-        if risk_score < 50 or urgency_score < 70 or importance_score < 60:
+        if urgency_score < 60 or importance_score < 40:
             return None
         return (
-            ai_breaking_reason[:300]
-            or f"AI selected this time-sensitive report with risk {risk_score}/100."
+            sanitize_public_text(ai_breaking_reason)[:300]
+            or f"Selected as a time-sensitive report with risk {risk_score}/100."
         )
     if urgency_score >= 85 and risk_score >= 75:
-        return f"AI marked this as urgent with risk {risk_score}/100."
+        return f"Urgent developing report with risk {risk_score}/100."
     if risk_level == "critical" and urgency_score >= 75:
-        return f"AI classified this as critical with urgency {urgency_score}/100."
+        return f"Critical report with urgency {urgency_score}/100."
     if risk_score >= 85 and importance_score >= 75 and urgency_score >= 70:
-        return f"AI scored this as high-risk, high-impact news."
+        return "High-risk, high-impact developing report."
     return None
 
 
@@ -1431,7 +1561,10 @@ def _deduplicate_items(
             selected[duplicate_index] = item
     return sorted(
         selected,
-        key=lambda item: _item_rank_score(item, suggestions.get(item.id)),
+        key=lambda item: (
+            item.published_at is not None,
+            _item_rank_score(item, suggestions.get(item.id)),
+        ),
         reverse=True,
     )
 

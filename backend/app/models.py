@@ -241,3 +241,19 @@ class AdminApiKey(Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PublicApiKey(Base):
+    __tablename__ = "public_api_keys"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    requests_per_minute: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    monthly_request_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=100000)
+    monthly_request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    usage_month: Mapped[str] = mapped_column(String(7), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

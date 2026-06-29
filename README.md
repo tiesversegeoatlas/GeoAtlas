@@ -1,6 +1,6 @@
 # GeoAtlas Backend Low Level Design
 
-Project work history is maintained in [documentation.md](documentation.md). The runnable data-collection backend is in [backend/](backend/) and implementation notes are in [docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md](docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md).
+Project work history is maintained in [documentation.md](documentation.md). The runnable data-collection backend is in [backend/](backend/), implementation notes are in [docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md](docs/GEOATLAS_DATA_COLLECTION_IMPLEMENTATION.md), the senior-facing commercialization proposal is in [docs/GEOATLAS_COMMERCIAL_API_PROPOSAL.md](docs/GEOATLAS_COMMERCIAL_API_PROPOSAL.md), and the detailed pricing, quota, SLA, and operations plan is in [docs/COMMERCIAL_API_PRODUCT_AND_PRICING.md](docs/COMMERCIAL_API_PRODUCT_AND_PRICING.md).
 
 ## 1. Backend Overview
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -88,11 +89,25 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def _mark_failed(job_id: str, message: str) -> None:
+    settings = get_settings()
     with SessionLocal() as db:
         job = db.get(AIAnalysisJob, job_id)
         if not job or job.status not in {"queued", "dispatched", "running"}:
             return
-        job.status = "failed"
-        job.error_message = message
-        job.finished_at = datetime.now(timezone.utc)
+        previous_retry = 0
+        match = re.match(r"Retry (\d+)/", job.error_message or "")
+        if match:
+            previous_retry = int(match.group(1))
+        if previous_retry < settings.ai_max_retries:
+            next_retry = previous_retry + 1
+            job.status = "queued"
+            job.started_at = None
+            job.finished_at = None
+            job.error_message = (
+                f"Retry {next_retry}/{settings.ai_max_retries} after: {message}"
+            )
+        else:
+            job.status = "failed"
+            job.error_message = message
+            job.finished_at = datetime.now(timezone.utc)
         db.commit()

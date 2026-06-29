@@ -9,13 +9,13 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai_pipeline import (
+    PROMPT_VERSION,
     analyze_text,
     heuristic_analysis,
     _provider_analysis,
     refresh_source_ai_credibility,
     run_ai_analysis,
 )
-from app.ai_backfill_worker import claim_next_job, reconcile_completed_jobs
 from app.ai_scheduler import dispatch_ai_jobs_once
 from app.article_utils import infer_location_candidates
 from app.config import get_settings
@@ -28,7 +28,9 @@ from app.models import (
     NormalizedItem,
     RawFetchedItem,
 )
-from app.main import _ai_progress, _item_rank_score, _public_item, _source_credibility_score
+from fastapi import HTTPException
+
+from app.main import _ai_progress, _item_rank_score, _public_item, _source_credibility_score, public_item, public_items
 
 
 class AIHeuristicTests(unittest.TestCase):
@@ -206,7 +208,7 @@ class AIHeuristicTests(unittest.TestCase):
             _item_rank_score(low_item, None),
         )
 
-    def test_ai_source_score_blends_without_replacing_editorial_score(self) -> None:
+    def test_assessed_source_score_replaces_editorial_score(self) -> None:
         source = ExternalSource(
             name="AI-ranked source",
             feed_url="https://ranked.example/feed",
@@ -216,8 +218,7 @@ class AIHeuristicTests(unittest.TestCase):
             ai_assessment_count=10,
         )
         score = _source_credibility_score(source)
-        self.assertGreater(score, 40)
-        self.assertLess(score, 82)
+        self.assertEqual(score, 40)
 
 
 class AIPersistenceTests(unittest.TestCase):
@@ -307,6 +308,8 @@ class AIPersistenceTests(unittest.TestCase):
 
         settings = get_settings()
         settings.ai_scheduler_batch_size = 20
+        settings.ai_provider = "heuristic"
+        settings.ai_model = "geoatlas-rules-v1"
         local_sessions = sessionmaker(bind=self.engine)
         with (
             patch("app.ai_scheduler.SessionLocal", local_sessions),
@@ -320,6 +323,48 @@ class AIPersistenceTests(unittest.TestCase):
         with Session(self.engine) as db:
             self.assertEqual(db.get(AIAnalysisJob, job_id).status, "dispatched")
 
+    def test_dispatcher_prioritizes_newest_current_provider_job(self) -> None:
+        with Session(self.engine) as db:
+            item = self._create_item(db)
+            old_other = AIAnalysisJob(
+                normalized_item_id=item.id,
+                provider="ollama",
+                model_name="llama3.1:8b",
+                created_at=datetime.now(timezone.utc) - timedelta(days=7),
+            )
+            older_current = AIAnalysisJob(
+                normalized_item_id=item.id,
+                provider="openai",
+                model_name="gpt-4.1-mini",
+                created_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            )
+            newest_current = AIAnalysisJob(
+                normalized_item_id=item.id,
+                provider="openai",
+                model_name="gpt-4.1-mini",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add_all([old_other, older_current, newest_current])
+            db.commit()
+            newest_id = newest_current.id
+            old_other_id = old_other.id
+
+        settings = get_settings()
+        settings.ai_provider = "openai"
+        settings.ai_model = "gpt-4.1-mini"
+        settings.ai_scheduler_batch_size = 1
+        local_sessions = sessionmaker(bind=self.engine)
+        with (
+            patch("app.ai_scheduler.SessionLocal", local_sessions),
+            patch("app.ai_scheduler.get_settings", return_value=settings),
+            patch("app.ai_scheduler.schedule_ai_analysis", return_value=True),
+        ):
+            dispatched = dispatch_ai_jobs_once()
+
+        self.assertEqual(dispatched, [newest_id])
+        with Session(self.engine) as db:
+            self.assertEqual(db.get(AIAnalysisJob, old_other_id).status, "queued")
+
     def test_ai_progress_reports_current_prompt_coverage(self) -> None:
         with Session(self.engine) as db:
             item = self._create_item(db)
@@ -328,7 +373,7 @@ class AIPersistenceTests(unittest.TestCase):
                     normalized_item_id=item.id,
                     provider="ollama",
                     model_name="llama3.1:8b",
-                    prompt_version="geoatlas-event-analysis-v12",
+                    prompt_version=PROMPT_VERSION,
                     input_hash="c" * 64,
                     confidence=0.8,
                     output_payload={"summary": "Grounded summary"},
@@ -353,78 +398,6 @@ class AIPersistenceTests(unittest.TestCase):
         self.assertGreaterEqual(progress["worker_capacity"], 1)
         self.assertIsInstance(progress["adaptive_workers"], bool)
 
-    def test_backfill_skips_job_when_current_prompt_is_already_processed(self) -> None:
-        with Session(self.engine) as db:
-            item = self._create_item(db)
-            suggestion = AISuggestion(
-                normalized_item_id=item.id,
-                provider="ollama",
-                model_name="llama3.1:8b",
-                prompt_version="geoatlas-event-analysis-v12",
-                input_hash="f" * 64,
-                confidence=0.8,
-                output_payload={"summary": "Already processed"},
-            )
-            job = AIAnalysisJob(
-                normalized_item_id=item.id,
-                status="queued",
-                provider="ollama",
-                model_name="llama3.1:8b",
-            )
-            db.add_all([suggestion, job])
-            db.commit()
-            job_id = job.id
-            suggestion_id = suggestion.id
-
-        settings = get_settings()
-        settings.ai_provider = "ollama"
-        settings.ai_model = "llama3.1:8b"
-        local_sessions = sessionmaker(bind=self.engine)
-        with (
-            patch("app.ai_backfill_worker.SessionLocal", local_sessions),
-            patch("app.ai_backfill_worker.get_settings", return_value=settings),
-        ):
-            skipped = reconcile_completed_jobs()
-
-        self.assertEqual(skipped, 1)
-        with Session(self.engine) as db:
-            job = db.get(AIAnalysisJob, job_id)
-            self.assertEqual(job.status, "success")
-            self.assertEqual(job.suggestion_id, suggestion_id)
-
-    def test_backfill_does_not_claim_duplicate_item_while_sibling_is_running(self) -> None:
-        with Session(self.engine) as db:
-            item = self._create_item(db)
-            db.add_all(
-                [
-                    AIAnalysisJob(
-                        normalized_item_id=item.id,
-                        status="running",
-                        provider="ollama",
-                        model_name="llama3.1:8b",
-                    ),
-                    AIAnalysisJob(
-                        normalized_item_id=item.id,
-                        status="queued",
-                        provider="ollama",
-                        model_name="llama3.1:8b",
-                    ),
-                ]
-            )
-            db.commit()
-
-        settings = get_settings()
-        settings.ai_provider = "ollama"
-        settings.ai_model = "llama3.1:8b"
-        local_sessions = sessionmaker(bind=self.engine)
-        with (
-            patch("app.ai_backfill_worker.SessionLocal", local_sessions),
-            patch("app.ai_backfill_worker.get_settings", return_value=settings),
-        ):
-            claimed = claim_next_job()
-
-        self.assertIsNone(claimed)
-
     def test_high_confidence_ai_fills_only_missing_public_fields(self) -> None:
         with Session(self.engine) as db:
             item = self._create_item(db)
@@ -432,6 +405,9 @@ class AIPersistenceTests(unittest.TestCase):
             item.body = None
             item.category_hints = None
             item.location_hints = None
+            item.canonical_url = (
+                "https://example.com/flood?utm_source=openai&id=42#details"
+            )
             db.commit()
             suggestion = AISuggestion(
                 normalized_item_id=item.id,
@@ -441,8 +417,14 @@ class AIPersistenceTests(unittest.TestCase):
                 input_hash="b" * 64,
                 confidence=0.9,
                 output_payload={
-                    "summary": "A concise AI-generated summary grounded in the report.",
-                    "generated_content": "A source-grounded briefing generated because the source body was missing.",
+                    "summary": (
+                        "A concise flood summary. "
+                        "([example.com](https://example.com/flood?utm_source=openai))"
+                    ),
+                    "generated_content": (
+                        "A source-grounded flood briefing. "
+                        "https://example.com/flood?utm_source=openai"
+                    ),
                     "categories": ["natural_disaster"],
                     "location": "Delhi, India",
                     "country_code": "IN",
@@ -464,10 +446,13 @@ class AIPersistenceTests(unittest.TestCase):
 
             output = _public_item(item, include_body=True, suggestion=suggestion)
 
-            self.assertIn("summary", output.ai_enriched_fields)
-            self.assertIn("body", output.ai_enriched_fields)
-            self.assertIn("categories", output.ai_enriched_fields)
-            self.assertIn("location", output.ai_enriched_fields)
+            self.assertEqual(output.summary, "A concise flood summary.")
+            self.assertEqual(output.body, "A source-grounded flood briefing.")
+            self.assertEqual(
+                output.canonical_url,
+                "https://example.com/flood?id=42",
+            )
+            self.assertEqual(output.category_hints, ["natural_disaster"])
             self.assertEqual(output.risk_level, "high")
             self.assertEqual(output.importance_score, 80)
             self.assertTrue(output.is_breaking)
@@ -476,14 +461,10 @@ class AIPersistenceTests(unittest.TestCase):
                 "An urgent flood warning requires immediate attention.",
             )
             self.assertEqual(output.source.credibility_tier, "very_high")
-            self.assertTrue(output.ai_applied)
-            self.assertEqual(output.ai_provider, "heuristic")
-            self.assertEqual(output.ai_confidence, 0.9)
-            self.assertEqual(
-                output.ai_summary,
-                "A concise AI-generated summary grounded in the report.",
-            )
-            self.assertIsNotNone(output.ai_location)
+            self.assertEqual(output.locations[0].name, "Delhi, India")
+            self.assertNotIn("method", output.location_hints[0])
+            self.assertNotIn("evidence", output.location_hints[0])
+            self.assertFalse(any(key.startswith("ai_") for key in output.model_dump()))
 
     def test_medium_confidence_ai_text_and_final_risk_are_applied(self) -> None:
         with Session(self.engine) as db:
@@ -496,13 +477,15 @@ class AIPersistenceTests(unittest.TestCase):
                 input_hash="c" * 64,
                 confidence=0.7,
                 output_payload={
-                    "summary": "AI review summary.",
-                    "generated_content": "AI review content.",
+                    "summary": "Review summary.",
+                    "generated_content": "Review content.",
                     "categories": ["general"],
                     "risk_level": "low",
                     "risk_score": 25,
                     "urgency_score": 20,
                     "importance_score": 20,
+                    "is_breaking": True,
+                    "breaking_reason": "A newly developing event requires attention.",
                     "claim_quality_score": 65,
                 },
                 status="pending_review",
@@ -513,16 +496,11 @@ class AIPersistenceTests(unittest.TestCase):
 
             output = _public_item(item, include_body=True, suggestion=suggestion)
 
-            self.assertTrue(output.ai_applied)
-            self.assertEqual(output.ai_provider, "ollama")
-            self.assertEqual(output.ai_model, "llama3.1:8b")
-            self.assertEqual(output.ai_confidence, 0.7)
-            self.assertEqual(output.ai_status, "pending_review")
-            self.assertIn("summary", output.ai_enriched_fields)
-            self.assertIn("body", output.ai_enriched_fields)
-            self.assertEqual(output.summary, "AI review summary.")
-            self.assertEqual(output.body, "AI review content.")
+            self.assertEqual(output.summary, "Review summary.")
+            self.assertEqual(output.body, "Review content.")
             self.assertEqual(output.risk_score, 25)
+            self.assertFalse(output.is_breaking)
+            self.assertIsNone(output.breaking_reason)
 
     def test_medium_confidence_ai_fills_text_but_not_unverified_location(self) -> None:
         with Session(self.engine) as db:
@@ -556,10 +534,63 @@ class AIPersistenceTests(unittest.TestCase):
             output = _public_item(item, include_body=True, suggestion=suggestion)
 
             self.assertEqual(output.body, "A grounded reconstruction limited to the available source text.")
-            self.assertEqual(output.ai_summary, "A grounded summary from the available source text.")
-            self.assertIn("body", output.ai_enriched_fields)
-            self.assertNotIn("location", output.ai_enriched_fields)
-            self.assertIsNone(output.ai_location)
+            self.assertEqual(output.summary, "A grounded summary from the available source text.")
+            self.assertEqual(output.locations, [])
+
+    def test_public_items_require_ai_suggestion_when_auto_analyze_enabled(self) -> None:
+        with Session(self.engine) as db:
+            item = self._create_item(db)
+
+        settings = get_settings()
+        settings.ai_enabled = True
+        settings.ai_auto_analyze = True
+        local_sessions = sessionmaker(bind=self.engine)
+        with (
+            patch("app.main.get_settings", return_value=settings),
+            patch("app.main.SessionLocal", local_sessions),
+        ):
+            with Session(self.engine) as db:
+                response = public_items(db=db, limit=25, offset=0, include_body=True, deduplicate=False)
+                self.assertEqual(response.items, [])
+                self.assertEqual(response.total, 0)
+                with self.assertRaises(HTTPException) as exc:
+                    public_item(item.id, db=db)
+                self.assertEqual(exc.exception.status_code, 404)
+
+        with Session(self.engine) as db:
+            suggestion = AISuggestion(
+                normalized_item_id=item.id,
+                provider="heuristic",
+                model_name="geoatlas-rules-v1",
+                prompt_version="test",
+                input_hash="require-ai" * 7 + "x",
+                confidence=0.9,
+                output_payload={
+                    "summary": "AI summary.",
+                    "generated_content": "AI generated content.",
+                    "risk_level": "high",
+                    "risk_score": 80,
+                    "urgency_score": 78,
+                    "importance_score": 76,
+                    "is_breaking": True,
+                    "breaking_reason": "Developing high-impact report.",
+                    "claim_quality_score": 81,
+                },
+                status="pending_review",
+            )
+            db.add(suggestion)
+            db.commit()
+
+        with (
+            patch("app.main.get_settings", return_value=settings),
+            patch("app.main.SessionLocal", local_sessions),
+        ):
+            with Session(self.engine) as db:
+                response = public_items(db=db, limit=25, offset=0, include_body=True, deduplicate=False)
+                self.assertEqual(len(response.items), 1)
+                self.assertEqual(response.total, 1)
+                self.assertEqual(response.items[0].id, item.id)
+                self.assertEqual(public_item(item.id, db=db).id, item.id)
 
     def test_ai_location_overrides_only_source_scope_location_fallback(self) -> None:
         with Session(self.engine) as db:
@@ -600,9 +631,6 @@ class AIPersistenceTests(unittest.TestCase):
 
             output = _public_item(item, include_body=True, suggestion=suggestion)
 
-            self.assertIn("location", output.ai_enriched_fields)
-            self.assertIsNotNone(output.ai_location)
-            self.assertEqual(output.ai_location.name, "Los Angeles, United States")
             self.assertEqual(output.locations[0].name, "Los Angeles, United States")
 
     def test_source_ai_credibility_aggregates_article_assessments(self) -> None:

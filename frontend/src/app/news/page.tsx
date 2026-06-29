@@ -93,7 +93,7 @@ export default function NewsPage() {
             <div className="atlas-section-title"><h2>News feeds</h2><span>{sources.length}</span></div>
             {sources.slice(0, visibleSourceCount).map((source) => (
               <a href={source.siteUrl || source.feedUrl} target="_blank" rel="noreferrer" key={source.id}>
-                <span><strong>{source.name}</strong><small>{source.credibilityTier} credibility{source.aiCredibilityScore != null ? ` · AI ${Math.round(source.aiCredibilityScore)}% from ${source.aiAssessmentCount} reports` : " · AI pending"}</small></span>
+                <span><strong>{source.name}</strong><small>{source.credibilityTier} credibility</small></span>
                 <em>{Math.round(source.credibilityScore)}%</em>
               </a>
             ))}
@@ -116,7 +116,7 @@ function NewsRow({ event }: { event: GeoEvent }) {
         ? <Image src={event.imageUrl} alt="" width={112} height={78} unoptimized />
         : <div className="atlas-news-page-placeholder">{event.region.slice(0, 2).toUpperCase()}</div>}
       <div>
-        <span><b className={event.riskLevel}>{event.riskLevel}</b> {formatUserDateTime(event.timestamp)}</span>
+        <span>{event.isBreaking && <b className="critical">BREAKING</b>} <b className={event.riskLevel}>{event.riskLevel}</b> {formatUserDateTime(event.timestamp)}</span>
         <h2>{event.title}</h2>
         <p>{event.summary}</p>
         <small>{event.sources[0]?.name} · {event.country} · Risk {event.riskScore}/100</small>

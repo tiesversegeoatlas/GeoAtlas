@@ -329,6 +329,49 @@ class BoundedIngestionTests(unittest.TestCase):
                 ["Dated news", "Undated news"],
             )
 
+    def test_public_list_can_filter_to_recent_items_without_deduplication(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from app.main import public_items
+
+        with Session(self.engine) as db:
+            source = ExternalSource(
+                name="Recent map source",
+                feed_url="https://example.com/recent-map.xml",
+                status="active",
+                enabled=True,
+            )
+            db.add(source)
+            db.commit()
+            now = datetime.now(timezone.utc)
+            db.add_all(
+                [
+                    NormalizedItem(
+                        raw_item_id="00000000-0000-0000-0000-000000000004",
+                        source_id=source.id,
+                        title="Recent map news",
+                        published_at=now - timedelta(hours=2),
+                    ),
+                    NormalizedItem(
+                        raw_item_id="00000000-0000-0000-0000-000000000005",
+                        source_id=source.id,
+                        title="Old map news",
+                        published_at=now - timedelta(days=2),
+                    ),
+                ]
+            )
+            db.commit()
+
+            response = public_items(
+                db=db,
+                limit=100,
+                include_body=False,
+                deduplicate=False,
+                since_hours=24,
+            )
+
+            self.assertEqual([item.title for item in response.items], ["Recent map news"])
+            self.assertEqual(response.total, 1)
+
     def test_scheduler_queues_only_due_sources(self) -> None:
         from datetime import datetime, timezone
 

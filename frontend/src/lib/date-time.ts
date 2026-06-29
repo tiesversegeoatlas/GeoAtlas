@@ -11,6 +11,13 @@ export function parseTimestamp(value: string) {
   return new Date(normalizeTimestamp(value));
 }
 
+export function isWithinHours(value: string, hours: number, now = Date.now()) {
+  const timestamp = parseTimestamp(value).getTime();
+  return Number.isFinite(timestamp)
+    && timestamp >= now - hours * 60 * 60 * 1000
+    && timestamp <= now + 5 * 60 * 1000;
+}
+
 export function formatUserDateTime(value: string) {
   const date = parseTimestamp(value);
   if (Number.isNaN(date.getTime())) return "Time unavailable";

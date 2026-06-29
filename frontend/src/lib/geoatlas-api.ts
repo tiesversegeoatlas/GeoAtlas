@@ -1,3 +1,4 @@
+import { parseTimestamp } from "@/lib/date-time";
 import { EventCategory, EventPage, GeoEvent, NewsSource, OverviewAnalytics, RiskLevel } from "@/types";
 
 type BackendSource = {
@@ -5,7 +6,6 @@ type BackendSource = {
   name: string;
   feed_url: string;
   site_url: string | null;
-  reliability_score: number;
   credibility_score?: number;
   credibility_tier?: string;
 };
@@ -16,11 +16,6 @@ type BackendLocation = {
   latitude?: number | null;
   longitude?: number | null;
   confidence?: number | null;
-};
-
-type BackendWebSource = {
-  title: string;
-  url: string;
 };
 
 type BackendItem = {
@@ -46,16 +41,6 @@ type BackendItem = {
   breaking_reason?: string | null;
   credibility_score?: number;
   rank_score?: number;
-  ai_enriched_fields?: string[];
-  ai_applied?: boolean;
-  ai_provider?: string | null;
-  ai_model?: string | null;
-  ai_confidence?: number | null;
-  ai_status?: string | null;
-  ai_summary?: string | null;
-  ai_generated_content?: string | null;
-  ai_location?: BackendLocation | null;
-  web_sources?: BackendWebSource[];
 };
 
 type BackendItemsResponse = {
@@ -73,8 +58,6 @@ type BackendPublicSource = {
   site_url: string | null;
   credibility_score: number;
   credibility_tier: string;
-  ai_credibility_score?: number | null;
-  ai_assessment_count?: number;
 };
 
 type BackendOverview = {
@@ -89,6 +72,77 @@ type BackendOverview = {
 };
 
 const API_ROOT = "/api/geoatlas/api/v1/public";
+
+function sanitizeDisplayText(value?: string | null): string {
+  return (value || "")
+    .replace(/\s*\(\s*\[[^\]]*]\(\s*https?:\/\/[^)]+\)\s*\)/gi, "")
+    .replace(/!\[([^\]]*)]\(\s*https?:\/\/[^)]+\)/gi, "$1")
+    .replace(/\[([^\]]+)]\(\s*https?:\/\/[^)]+\)/gi, (_, label: string) =>
+      /^(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(label.trim())
+        ? ""
+        : label,
+    )
+    .replace(/<?https?:\/\/[^\s<>\])}]+>?/gi, "")
+    .replace(/\b(?:AI|artificial intelligence)[ -](?:generated|written|created|produced)\b/gi, "")
+    .replace(/\bAI\s+(?=(?:analysis|review|summary|content|response|assistant|model|system)\b)/gi, "")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function sanitizeDisplayUrl(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    [...url.searchParams.keys()].forEach((key) => {
+      if (
+        key.toLowerCase().startsWith("utm_") ||
+        ["fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid", "ocid"].includes(key.toLowerCase())
+      ) {
+        url.searchParams.delete(key);
+      }
+    });
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+function timestampMs(value?: string | null): number {
+  if (!value) return Number.NaN;
+  return parseTimestamp(value).getTime();
+}
+
+function resolveOperationalTimestamp(
+  publishedAt?: string | null,
+  collectedAt?: string | null,
+): string {
+  const publishedMs = timestampMs(publishedAt);
+  const collectedMs = timestampMs(collectedAt);
+  const now = Date.now();
+  const hasPublished = Number.isFinite(publishedMs);
+  const hasCollected = Number.isFinite(collectedMs);
+
+  if (hasPublished) {
+    const aheadOfNow = publishedMs > now + 5 * 60 * 1000;
+    const aheadOfCollection = hasCollected && publishedMs > collectedMs + 15 * 60 * 1000;
+    if (!aheadOfNow && !aheadOfCollection) {
+      return publishedAt as string;
+    }
+  }
+
+  if (hasCollected) {
+    return collectedAt as string;
+  }
+
+  if (publishedAt) {
+    return publishedAt;
+  }
+
+  return new Date(now).toISOString();
+}
 
 function mapRisk(value?: string | null): RiskLevel {
   if (value === "critical" || value === "high" || value === "medium") return value;
@@ -129,12 +183,24 @@ export function mapItem(item: BackendItem): GeoEvent {
         : "low"),
   );
   const fallbackRiskScore = { critical: 95, high: 78, medium: 55, low: 28 }[riskLevel];
-  const originalUrl = item.canonical_url || item.source.site_url || item.source.feed_url;
+  const originalUrl = sanitizeDisplayUrl(
+    item.canonical_url || item.source.site_url || item.source.feed_url,
+  ) || "";
+  const summary = sanitizeDisplayText(
+    item.summary || item.body?.slice(0, 240) || "No summary is available.",
+  );
+  const description = sanitizeDisplayText(
+    item.body || item.summary || "No article body is available.",
+  );
+  const operationalTimestamp = resolveOperationalTimestamp(
+    item.published_at,
+    item.collected_at,
+  );
   return {
     id: item.id,
-    title: item.title,
-    summary: item.summary || item.body?.slice(0, 240) || "No summary is available.",
-    description: item.body || item.summary || "No article body is available.",
+    title: sanitizeDisplayText(item.title) || "Untitled report",
+    summary: summary || "No summary is available.",
+    description: description || "No article body is available.",
     country: location?.name || "Location unconfirmed",
     region: location?.country_code || location?.name || "Global",
     latitude: Number.isFinite(latitude) ? latitude : 0,
@@ -145,11 +211,11 @@ export function mapItem(item: BackendItem): GeoEvent {
     urgencyScore: item.urgency_score ?? fallbackRiskScore,
     importanceScore: item.importance_score ?? fallbackRiskScore,
     isBreaking: Boolean(item.is_breaking),
-    breakingReason: item.breaking_reason || undefined,
+    breakingReason: sanitizeDisplayText(item.breaking_reason) || undefined,
     verificationStatus: item.extraction_status.includes("enriched") || item.extraction_status === "url_scraped"
       ? "verified"
       : "investigating",
-    timestamp: item.published_at || item.collected_at,
+    timestamp: operationalTimestamp,
     lastUpdated: item.collected_at,
     timeline: [],
     sources: [
@@ -157,39 +223,19 @@ export function mapItem(item: BackendItem): GeoEvent {
         name: item.source.name,
         url: originalUrl,
         reliability: Math.round(
-          item.source.credibility_score ?? item.source.reliability_score * 100,
+        item.source.credibility_score ?? 50,
         ),
       },
-      ...(item.web_sources || [])
-        .filter((source) => source.url !== originalUrl)
-        .map((source) => ({ name: source.title, url: source.url })),
     ],
     confidenceScore: Number.isFinite(confidence)
       ? Math.round(confidence * 100)
       : Math.round(
-          item.source.credibility_score ?? item.source.reliability_score * 100,
+          item.source.credibility_score ?? 50,
         ),
     relatedEventIds: [],
-    imageUrl: item.image_url || undefined,
-    canonicalUrl: item.canonical_url || undefined,
+    imageUrl: sanitizeDisplayUrl(item.image_url),
+    canonicalUrl: sanitizeDisplayUrl(item.canonical_url),
     sourceId: item.source.id,
-    aiApplied: Boolean(item.ai_applied),
-    aiProvider: item.ai_provider || undefined,
-    aiModel: item.ai_model || undefined,
-    aiConfidence: item.ai_confidence == null
-      ? undefined
-      : Math.round(item.ai_confidence * 100),
-    aiStatus: item.ai_status || undefined,
-    aiEnrichedFields: item.ai_enriched_fields || [],
-    aiSummary: item.ai_summary || undefined,
-    aiGeneratedContent: item.ai_generated_content || undefined,
-    aiLocation: item.ai_location ? {
-      name: item.ai_location.name,
-      countryCode: item.ai_location.country_code || undefined,
-      latitude: item.ai_location.latitude ?? undefined,
-      longitude: item.ai_location.longitude ?? undefined,
-      confidence: item.ai_location.confidence ?? undefined,
-    } : undefined,
   };
 }
 
@@ -201,8 +247,15 @@ async function request<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function fetchEvents(limit = 40): Promise<GeoEvent[]> {
-  return (await fetchEventPage({ limit, includeBody: false, deduplicate: true })).events;
+export async function fetchEvents(limit = 100): Promise<GeoEvent[]> {
+  return (
+    await fetchEventPage({
+      limit,
+      includeBody: true,
+      deduplicate: false,
+      sinceHours: 24,
+    })
+  ).events;
 }
 
 export async function fetchEvent(id: string): Promise<GeoEvent> {
@@ -214,17 +267,34 @@ export async function fetchEventPage({
   offset = 0,
   includeBody = false,
   deduplicate = false,
+  sinceHours,
 }: {
   limit?: number;
   offset?: number;
   includeBody?: boolean;
   deduplicate?: boolean;
+  sinceHours?: number;
 } = {}): Promise<EventPage> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+    include_body: String(includeBody),
+    deduplicate: String(deduplicate),
+  });
+  if (sinceHours !== undefined) {
+    query.set("since_hours", String(sinceHours));
+  }
   const data = await request<BackendItemsResponse>(
-    `/items?limit=${limit}&offset=${offset}&include_body=${includeBody}&deduplicate=${deduplicate}`,
+    `/items?${query.toString()}`,
   );
   return {
-    events: data.items.map(mapItem),
+    events: data.items
+      .map(mapItem)
+      .sort(
+        (left, right) =>
+          parseTimestamp(right.timestamp).getTime()
+          - parseTimestamp(left.timestamp).getTime(),
+      ),
     total: data.total,
     offset: data.offset,
     limit: data.limit,
@@ -241,8 +311,6 @@ export async function fetchNewsSources(): Promise<NewsSource[]> {
     siteUrl: source.site_url || undefined,
     credibilityScore: source.credibility_score,
     credibilityTier: source.credibility_tier,
-    aiCredibilityScore: source.ai_credibility_score ?? undefined,
-    aiAssessmentCount: source.ai_assessment_count ?? 0,
   }));
 }
 

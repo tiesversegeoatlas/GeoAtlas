@@ -160,9 +160,6 @@ class PublicSource(BaseModel):
     name: str
     feed_url: str
     site_url: str | None
-    reliability_score: float
-    ai_credibility_score: float | None = None
-    ai_assessment_count: int = 0
     credibility_score: float
     credibility_tier: str
     last_success_at: datetime | None
@@ -174,11 +171,6 @@ class PublicLocation(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     confidence: float | None = None
-
-
-class PublicWebSource(BaseModel):
-    title: str
-    url: str
 
 
 class PublicItem(BaseModel):
@@ -205,16 +197,6 @@ class PublicItem(BaseModel):
     breaking_reason: str | None = None
     credibility_score: float
     rank_score: float
-    ai_enriched_fields: list[str] = Field(default_factory=list)
-    ai_applied: bool = False
-    ai_provider: str | None = None
-    ai_model: str | None = None
-    ai_confidence: float | None = None
-    ai_status: str | None = None
-    ai_summary: str | None = None
-    ai_generated_content: str | None = None
-    ai_location: PublicLocation | None = None
-    web_sources: list[PublicWebSource] = Field(default_factory=list)
 
 
 class PublicItemsResponse(BaseModel):

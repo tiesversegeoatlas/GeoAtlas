@@ -50,21 +50,6 @@ export interface GeoEvent {
   imageUrl?: string;
   canonicalUrl?: string;
   sourceId?: string;
-  aiApplied: boolean;
-  aiProvider?: string;
-  aiModel?: string;
-  aiConfidence?: number;
-  aiStatus?: string;
-  aiEnrichedFields: string[];
-  aiSummary?: string;
-  aiGeneratedContent?: string;
-  aiLocation?: {
-    name: string;
-    countryCode?: string;
-    latitude?: number;
-    longitude?: number;
-    confidence?: number;
-  };
 }
 
 export interface EventPage {
@@ -82,8 +67,6 @@ export interface NewsSource {
   siteUrl?: string;
   credibilityScore: number;
   credibilityTier: string;
-  aiCredibilityScore?: number;
-  aiAssessmentCount: number;
 }
 
 export interface OverviewAnalytics {

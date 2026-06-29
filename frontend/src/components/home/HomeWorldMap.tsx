@@ -1,11 +1,13 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
-import { GeoJSON as LeafletGeoJSON, MapContainer, Marker, TileLayer, Tooltip, useMap } from "react-leaflet";
+import { GeoJSON as LeafletGeoJSON, MapContainer, Marker, Popup, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import type { FeatureCollection, Geometry } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { GeoEvent } from "@/types";
+import { isWithinHours } from "@/lib/date-time";
 
 type BoundaryCollection = FeatureCollection<Geometry, {
   ADMIN?: string;
@@ -111,10 +113,10 @@ function loadAdminBoundaries() {
 }
 
 function MapController({
-  zoomCommand,
+  mapCommand,
   focus,
 }: {
-  zoomCommand: number;
+  mapCommand: { action: "idle" | "reset" | "zoom-in" | "zoom-out"; nonce: number };
   focus: [number, number] | null;
 }) {
   const map = useMap();
@@ -124,20 +126,38 @@ function MapController({
       map.flyTo(focus, Math.max(map.getZoom(), 4));
       return;
     }
-    if (zoomCommand === 0) map.setView([22, 5], 2, { animate: true });
-    if (zoomCommand > 0) map.zoomIn();
-    if (zoomCommand < 0) map.zoomOut();
-  }, [focus, map, zoomCommand]);
+    if (mapCommand.action === "reset") {
+      map.setView([22, 5], 2, { animate: true });
+      return;
+    }
+    if (mapCommand.action === "zoom-in") {
+      map.zoomIn();
+      return;
+    }
+    if (mapCommand.action === "zoom-out") {
+      map.zoomOut();
+    }
+  }, [focus, map, mapCommand]);
   return null;
 }
 
-function markerIcon(event: GeoEvent) {
+function MapZoomObserver({ onZoom }: { onZoom: (zoom: number) => void }) {
+  const map = useMapEvents({
+    zoomend: () => onZoom(map.getZoom()),
+  });
+  useEffect(() => {
+    onZoom(map.getZoom());
+  }, [map, onZoom]);
+  return null;
+}
+
+function markerIcon(event: GeoEvent, count: number) {
   const color = riskColor(event.riskLevel);
   return new L.DivIcon({
     className: "atlas-map-marker",
-    html: `<span style="--marker:${color}"></span>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    html: `<span class="${count > 1 ? "clustered" : ""}" style="--marker:${color}">${count > 1 ? `<b>${count}</b>` : ""}</span>`,
+    iconSize: count > 1 ? [26, 26] : [18, 18],
+    iconAnchor: count > 1 ? [13, 13] : [9, 9],
   });
 }
 
@@ -160,25 +180,126 @@ function normalizePlace(value: string) {
     .toLowerCase();
 }
 
+function clusterCellSize(zoom: number) {
+  if (zoom <= 2) return 12;
+  if (zoom === 3) return 6;
+  if (zoom === 4) return 3;
+  if (zoom === 5) return 1.5;
+  if (zoom === 6) return 0.65;
+  if (zoom === 7) return 0.25;
+  if (zoom === 8) return 0.1;
+  if (zoom === 9) return 0.04;
+  return 0.015;
+}
+
+function MarkerNewsCard({
+  representative,
+  count,
+  onOpen,
+}: {
+  representative: GeoEvent;
+  count: number;
+  onOpen?: (event: GeoEvent) => void;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => {
+    setImageFailed(false);
+  }, [representative.imageUrl]);
+  return (
+    <article className="atlas-marker-news-card">
+      {representative.imageUrl && !imageFailed && (
+        <Image
+          src={representative.imageUrl}
+          alt=""
+          width={320}
+          height={150}
+          unoptimized
+          onError={() => setImageFailed(true)}
+        />
+      )}
+      <div>
+        <span className={`atlas-marker-news-risk ${representative.riskLevel}`}>
+          {representative.isBreaking ? "BREAKING · " : ""}
+          {representative.riskLevel} risk
+        </span>
+        <h3>{representative.title}</h3>
+        <p>{representative.summary}</p>
+        <small>
+          {representative.country}
+          {count > 1 ? ` · ${count} reports nearby` : ""}
+        </small>
+        {onOpen && (
+          <button type="button" onClick={() => onOpen(representative)}>
+            Open report
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export default function HomeWorldMap({
   events,
   layer = "dark",
-  zoomCommand = 0,
+  mapCommand = { action: "idle", nonce: 0 },
   focus = null,
   onSelect,
 }: {
   events: GeoEvent[];
   layer?: "dark" | "light";
-  zoomCommand?: number;
+  mapCommand?: { action: "idle" | "reset" | "zoom-in" | "zoom-out"; nonce: number };
   focus?: [number, number] | null;
   onSelect?: (event: GeoEvent) => void;
 }) {
   const [boundaries, setBoundaries] = useState<BoundaryCollection | null>(boundaryCache);
   const [adminBoundaries, setAdminBoundaries] = useState<AdminBoundaryCollection | null>(adminBoundaryCache);
-  const mappedEvents = useMemo(
-    () => events.filter((event) => event.latitude !== 0 || event.longitude !== 0).slice(0, 40),
+  const [mapZoom, setMapZoom] = useState(2);
+  const recentEvents = useMemo(
+    () => events.filter((event) => isWithinHours(event.timestamp, 24)),
     [events],
   );
+  const mappedClusters = useMemo(() => {
+    const cellSize = clusterCellSize(mapZoom);
+    const priority: Record<GeoEvent["riskLevel"], number> = {
+      low: 0,
+      medium: 1,
+      high: 2,
+      critical: 3,
+    };
+    const clusters = new Map<string, {
+      events: GeoEvent[];
+      latitudeTotal: number;
+      longitudeTotal: number;
+      representative: GeoEvent;
+    }>();
+    for (const event of recentEvents) {
+      if (event.latitude === 0 && event.longitude === 0) continue;
+      const key = `${Math.round(event.latitude / cellSize)}:${Math.round(event.longitude / cellSize)}`;
+      const current = clusters.get(key);
+      if (!current) {
+        clusters.set(key, {
+          events: [event],
+          latitudeTotal: event.latitude,
+          longitudeTotal: event.longitude,
+          representative: event,
+        });
+        continue;
+      }
+      current.events.push(event);
+      current.latitudeTotal += event.latitude;
+      current.longitudeTotal += event.longitude;
+      const candidateRank = (event.isBreaking ? 10 : 0) + priority[event.riskLevel];
+      const currentRank = (current.representative.isBreaking ? 10 : 0)
+        + priority[current.representative.riskLevel];
+      if (candidateRank > currentRank) current.representative = event;
+    }
+    return Array.from(clusters.entries(), ([key, cluster]) => ({
+      key,
+      ...cluster,
+      latitude: cluster.latitudeTotal / cluster.events.length,
+      longitude: cluster.longitudeTotal / cluster.events.length,
+    }));
+  }, [mapZoom, recentEvents]);
 
   useEffect(() => {
     void loadBoundaries().then(setBoundaries);
@@ -221,7 +342,7 @@ export default function HomeWorldMap({
       high: 2,
       critical: 3,
     };
-    for (const event of events) {
+    for (const event of recentEvents) {
       const codes = new Set<string>();
       for (const rawValue of [event.region, event.country]) {
         const raw = rawValue.trim();
@@ -248,7 +369,7 @@ export default function HomeWorldMap({
       }
     }
     return highlights;
-  }, [boundaries, events]);
+  }, [boundaries, recentEvents]);
 
   const highlightedAdminRegions = useMemo(() => {
     const highlights = new Map<string, GeoEvent["riskLevel"]>();
@@ -271,7 +392,7 @@ export default function HomeWorldMap({
       high: 2,
       critical: 3,
     };
-    for (const event of events) {
+    for (const event of recentEvents) {
       for (const rawValue of [event.region, event.country]) {
         for (const part of [rawValue, ...rawValue.split(",")].map(normalizePlace)) {
           if (!part || countryNames.has(part) || !availableRegions.has(part)) continue;
@@ -283,7 +404,7 @@ export default function HomeWorldMap({
       }
     }
     return highlights;
-  }, [adminBoundaries, boundaries, events]);
+  }, [adminBoundaries, boundaries, recentEvents]);
 
   const highlightedAdminData = useMemo(() => {
     if (!adminBoundaries || !highlightedAdminRegions.size) return null;
@@ -326,7 +447,7 @@ export default function HomeWorldMap({
       center={[22, 5]}
       zoom={2}
       minZoom={2}
-      maxZoom={7}
+      maxZoom={10}
       zoomControl={false}
       attributionControl={false}
       scrollWheelZoom
@@ -338,6 +459,7 @@ export default function HomeWorldMap({
           ? "https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png"
           : "https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png"}
       />
+      <MapZoomObserver onZoom={setMapZoom} />
       {boundaryLayers && (
         <LeafletGeoJSON
           data={boundaryLayers.countries}
@@ -371,20 +493,22 @@ export default function HomeWorldMap({
           }}
         />
       )}
-      {mappedEvents.map((event) => (
+      {mappedClusters.map((cluster) => (
         <Marker
-          key={event.id}
-          position={[event.latitude, event.longitude]}
-          icon={markerIcon(event)}
-          eventHandlers={{ click: () => onSelect?.(event) }}
+          key={cluster.key}
+          position={[cluster.latitude, cluster.longitude]}
+          icon={markerIcon(cluster.representative, cluster.events.length)}
         >
-          <Tooltip direction="top" offset={[0, -8]} opacity={1}>
-            <strong>{event.title}</strong>
-            <span>{event.country}</span>
-          </Tooltip>
+          <Popup minWidth={240} maxWidth={300} autoPan>
+            <MarkerNewsCard
+              representative={cluster.representative}
+              count={cluster.events.length}
+              onOpen={onSelect}
+            />
+          </Popup>
         </Marker>
       ))}
-      <MapController zoomCommand={zoomCommand} focus={focus} />
+      <MapController mapCommand={mapCommand} focus={focus} />
     </MapContainer>
   );
 }
