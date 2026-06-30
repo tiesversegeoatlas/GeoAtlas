@@ -4,6 +4,59 @@ $port = 3000
 $homeUrl = "http://127.0.0.1:$port"
 $frontendRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+function Repair-FrontendDependenciesIfNeeded {
+    $nextDirectory = Join-Path $frontendRoot "node_modules\next"
+    $nextPackage = Join-Path $nextDirectory "package.json"
+    $nextCommand = Join-Path $frontendRoot "node_modules\.bin\next.cmd"
+    $requiresRepair = -not (Test-Path -LiteralPath $nextPackage) -or
+        -not (Test-Path -LiteralPath $nextCommand)
+
+    if (-not $requiresRepair) {
+        $nextItem = Get-Item -LiteralPath $nextDirectory -Force
+        if ($nextItem.LinkType) {
+            foreach ($target in @($nextItem.Target)) {
+                $targetPath = [System.IO.Path]::GetFullPath($target)
+                if (-not $targetPath.StartsWith(
+                    $frontendRoot,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                    $requiresRepair = $true
+                    break
+                }
+            }
+        }
+
+        if (-not $requiresRepair) {
+            $commandContents = Get-Content -LiteralPath $nextCommand -Raw
+            if ($commandContents -match [regex]::Escape(
+                (Join-Path (Split-Path $frontendRoot -Parent) "commercial_portal")
+            )) {
+                $requiresRepair = $true
+            }
+        }
+    }
+
+    if (-not $requiresRepair) {
+        return
+    }
+
+    Write-Host "Frontend dependencies are missing or linked to another project; repairing them..."
+    Push-Location $frontendRoot
+    try {
+        & npm.cmd ci --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm ci failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    if (-not (Test-Path -LiteralPath $nextPackage) -or -not (Test-Path -LiteralPath $nextCommand)) {
+        throw "Next.js was not installed correctly in $frontendRoot."
+    }
+}
+
 function Get-PortListener {
     $connection = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -58,6 +111,8 @@ if ($listener) {
 if ($listener) {
     throw "Port $port is occupied by another service (PID $($listener.OwningProcess)). Close it or change the GeoAtlas frontend port."
 }
+
+Repair-FrontendDependenciesIfNeeded
 
 Push-Location (Join-Path $PSScriptRoot "..")
 try {

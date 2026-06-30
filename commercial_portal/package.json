@@ -1,0 +1,21 @@
+{
+  "name": "geoatlas-commercial-portal",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-dev.ps1",
+    "dev:dry-run": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-dev.ps1 -DryRun",
+    "dev:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-backend.ps1",
+    "dev:frontend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-frontend.ps1",
+    "build": "npm --prefix ./frontend run build",
+    "lint": "npm --prefix ./frontend run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "concurrently": "^9.1.2"
+    }
+  }
+}

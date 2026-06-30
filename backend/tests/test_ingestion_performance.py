@@ -90,10 +90,21 @@ class IngestionPerformanceSettingsTests(unittest.TestCase):
 
 class BoundedIngestionTests(unittest.TestCase):
     def setUp(self) -> None:
+        get_settings.cache_clear()
+        self.ai_enabled = patch.object(get_settings(), "ai_enabled", False)
+        self.ai_auto_analyze = patch.object(
+            get_settings(),
+            "ai_auto_analyze",
+            False,
+        )
+        self.ai_enabled.start()
+        self.ai_auto_analyze.start()
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
 
     def tearDown(self) -> None:
+        self.ai_auto_analyze.stop()
+        self.ai_enabled.stop()
         get_settings.cache_clear()
         self.engine.dispose()
 

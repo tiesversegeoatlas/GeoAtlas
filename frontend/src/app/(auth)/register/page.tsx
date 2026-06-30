@@ -1,125 +1,102 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Field,
-  FieldLabel,
-  FieldContent,
-  FieldError,
-  FieldDescription
-} from "@/components/ui/field";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
-import { Globe, UserPlus } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
-const registerSchema = z.object({
-  fullName: z.string().min(2, "Full name is required"),
-  email: z.string().email("Invalid email address"),
-  organization: z.string().min(2, "Organization is required"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field, FieldContent, FieldError, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { registerPortalAccount } from "@/lib/portal-api";
+
+const schema = z.object({
+  full_name: z.string().min(2, "Enter your full name."),
+  email: z.string().email("Enter a valid email address."),
+  organization: z.string().min(2, "Enter your organization."),
+  password: z.string().min(8, "Password must be at least 8 characters."),
 });
 
-type RegisterFormValues = z.infer<typeof registerSchema>;
+type Values = z.infer<typeof schema>;
 
 export default function RegisterPage() {
   const router = useRouter();
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting }
-  } = useForm<RegisterFormValues>({
-    resolver: zodResolver(registerSchema),
-    defaultValues: {
-      fullName: "",
-      email: "",
-      organization: "",
-      password: "",
-    },
+  const form = useForm<Values>({
+    resolver: zodResolver(schema),
+    defaultValues: { full_name: "", email: "", organization: "", password: "" },
   });
 
-  function onSubmit(values: RegisterFormValues) {
-    console.log(values);
-    toast.success("Application submitted", {
-      description: "Your credentials will be reviewed by the security council."
-    });
-    router.push("/login");
-  }
+  const onSubmit = async (values: Values) => {
+    try {
+      await registerPortalAccount(values);
+      toast.success("Account created");
+      router.replace("/portal");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create account.");
+    }
+  };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4 relative overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,#3b82f61a,transparent_50%)]" />
-
-      <div className="w-full max-w-md relative z-10">
-        <div className="flex flex-col items-center mb-6 gap-2">
-          <div className="w-12 h-12 rounded-xl bg-primary flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/20">
-            <Globe className="w-7 h-7" />
-          </div>
-          <h1 className="text-3xl font-bold tracking-tighter">GEOATLAS</h1>
+    <main className="min-h-screen bg-background">
+      <section className="mx-auto grid min-h-screen w-full max-w-6xl items-center gap-8 px-4 py-10 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="space-y-5">
+          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-muted-foreground">GeoAtlas commercial API</p>
+          <h1 className="text-5xl font-bold tracking-tight">Create your API customer account.</h1>
+          <p className="max-w-xl text-lg text-muted-foreground">
+            Start on the free tier, generate your key, and prepare for production access as the commercial product expands.
+          </p>
         </div>
-
-        <Card className="bg-card/50 border-border shadow-2xl backdrop-blur-sm">
-          <CardHeader className="space-y-1 pb-4">
-            <CardTitle className="text-2xl text-center">Operator Enrollment</CardTitle>
-            <CardDescription className="text-center">
-              Request credentials for the geopolitical monitoring platform.
-            </CardDescription>
+        <Card className="border-border/70 shadow-xl">
+          <CardHeader>
+            <CardTitle>Create account</CardTitle>
+            <CardDescription>The first registered user becomes the bootstrap admin for this environment.</CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
               <Field>
-                <FieldLabel htmlFor="fullName">Full Legal Name</FieldLabel>
+                <FieldLabel htmlFor="full_name">Full name</FieldLabel>
                 <FieldContent>
-                  <Input id="fullName" placeholder="John Doe" className="bg-background/50 border-border" {...register("fullName")} />
-                  <FieldError errors={[{ message: errors.fullName?.message }]} />
+                  <Input id="full_name" {...form.register("full_name")} placeholder="Ahan Sardar" />
+                  <FieldError errors={[{ message: form.formState.errors.full_name?.message }]} />
                 </FieldContent>
               </Field>
-
               <Field>
-                <FieldLabel htmlFor="email">Professional Email</FieldLabel>
+                <FieldLabel htmlFor="email">Email</FieldLabel>
                 <FieldContent>
-                  <Input id="email" placeholder="john@un.org" className="bg-background/50 border-border" {...register("email")} />
-                  <FieldError errors={[{ message: errors.email?.message }]} />
+                  <Input id="email" {...form.register("email")} placeholder="you@company.com" />
+                  <FieldError errors={[{ message: form.formState.errors.email?.message }]} />
                 </FieldContent>
               </Field>
-
               <Field>
-                <FieldLabel htmlFor="organization">Organization / Agency</FieldLabel>
+                <FieldLabel htmlFor="organization">Organization</FieldLabel>
                 <FieldContent>
-                  <Input id="organization" placeholder="e.g., Reuters, NATO, ICRC" className="bg-background/50 border-border" {...register("organization")} />
-                  <FieldError errors={[{ message: errors.organization?.message }]} />
+                  <Input id="organization" {...form.register("organization")} placeholder="GeoAtlas Labs" />
+                  <FieldError errors={[{ message: form.formState.errors.organization?.message }]} />
                 </FieldContent>
               </Field>
-
               <Field>
                 <FieldLabel htmlFor="password">Password</FieldLabel>
                 <FieldContent>
-                  <Input id="password" type="password" placeholder="••••••••" className="bg-background/50 border-border" {...register("password")} />
-                  <FieldDescription className="text-[10px]">Must include upper, lower, numeric and symbol.</FieldDescription>
-                  <FieldError errors={[{ message: errors.password?.message }]} />
+                  <Input id="password" type="password" {...form.register("password")} placeholder="••••••••" />
+                  <FieldError errors={[{ message: form.formState.errors.password?.message }]} />
                 </FieldContent>
               </Field>
-
-              <Button type="submit" className="w-full h-11 font-bold tracking-wide mt-2" disabled={isSubmitting}>
-                <UserPlus className="w-4 h-4 mr-2" /> REQUEST ACCESS
+              <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
+                Create account
               </Button>
             </form>
-          </CardContent>
-          <CardFooter className="flex flex-col gap-4 border-t border-border mt-4 pt-6">
-            <div className="text-center text-xs text-muted-foreground">
-              Already have an assignment?{" "}
-              <Link href="/login" className="text-primary hover:underline font-bold">
-                Return to Login
+            <p className="mt-4 text-sm text-muted-foreground">
+              Already have an account?{" "}
+              <Link href="/login" className="font-medium text-primary hover:underline">
+                Sign in
               </Link>
-            </div>
-          </CardFooter>
+            </p>
+          </CardContent>
         </Card>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }

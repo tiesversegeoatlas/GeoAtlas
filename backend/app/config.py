@@ -41,6 +41,15 @@ class Settings:
     public_api_default_monthly_limit: int = max(
         1, int(getenv("GEOATLAS_PUBLIC_API_DEFAULT_MONTHLY_LIMIT", "100000"))
     )
+    portal_session_days: int = max(
+        1, int(getenv("GEOATLAS_PORTAL_SESSION_DAYS", "30"))
+    )
+    portal_admin_email: str | None = getenv("GEOATLAS_PORTAL_ADMIN_EMAIL") or None
+    portal_admin_password: str | None = getenv("GEOATLAS_PORTAL_ADMIN_PASSWORD") or None
+    portal_admin_name: str = getenv("GEOATLAS_PORTAL_ADMIN_NAME", "GeoAtlas Admin")
+    portal_hidden_admin_slug: str = getenv(
+        "GEOATLAS_PORTAL_HIDDEN_ADMIN_SLUG", "control-room-7f3a"
+    )
     admin_cors_origins: list[str] = [
         origin.strip()
         for origin in getenv(

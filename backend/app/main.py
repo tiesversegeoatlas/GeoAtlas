@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -35,9 +35,27 @@ from app.models import (
     IngestionJob,
     NormalizedItem,
     NormalizedItemLocation,
+    PortalApiKey,
+    PortalInvoice,
+    PortalPlan,
+    PortalSession,
+    PortalUser,
+    PublicApiKey,
     RawFetchedItem,
 )
-from app.public_api_keys import require_public_api_key
+from app.portal_auth import (
+    PORTAL_SESSION_COOKIE,
+    bootstrap_portal_admin,
+    clear_portal_session,
+    create_portal_session,
+    current_portal_user,
+    ensure_free_plan,
+    hash_password,
+    require_portal_admin,
+    require_portal_user,
+    verify_password,
+)
+from app.public_api_keys import create_public_api_key, require_public_api_key
 from app.public_content import (
     public_location_hint,
     sanitize_public_text,
@@ -60,6 +78,18 @@ from app.schemas import (
     PublicLocation,
     PublicOverview,
     PublicSource,
+    PortalAdminOverviewResponse,
+    PortalApiKeyResponse,
+    PortalCreateApiKeyRequest,
+    PortalDashboardResponse,
+    PortalInvoiceCreateRequest,
+    PortalInvoiceResponse,
+    PortalLoginRequest,
+    PortalPlanResponse,
+    PortalPlanUpsertRequest,
+    PortalRegisterRequest,
+    PortalUserAdminUpdateRequest,
+    PortalUserResponse,
     SourceBulkImportRequest,
     SourceBulkImportResponse,
     SourceCreate,
@@ -177,6 +207,8 @@ def initialize_database() -> None:
         app.state.database_ready = True
         app.state.database_error = None
         with SessionLocal() as db:
+            ensure_free_plan(db)
+            bootstrap_portal_admin(db)
             active_job_ids = list(
                 db.scalars(
                     select(IngestionJob.id).where(IngestionJob.status.in_(["queued", "running"]))
@@ -232,6 +264,378 @@ def source_including_archived_or_404(db: Session, source_id: str) -> ExternalSou
     if not source:
         raise HTTPException(status_code=404, detail="Source not found.")
     return source
+
+
+def _normalize_email(value: str) -> str:
+    return value.strip().lower()
+
+
+def _portal_plan_response(plan: PortalPlan | None) -> PortalPlanResponse | None:
+    if plan is None:
+        return None
+    return PortalPlanResponse.model_validate(plan)
+
+
+def _portal_user_response(user: PortalUser, plan: PortalPlan | None) -> PortalUserResponse:
+    return PortalUserResponse(
+        id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        organization=user.organization,
+        is_admin=user.is_admin,
+        active=user.active,
+        billing_status=user.billing_status,
+        created_at=user.created_at,
+        plan=_portal_plan_response(plan),
+    )
+
+
+def _portal_api_key_response(
+    mapping: PortalApiKey,
+    key: PublicApiKey,
+    *,
+    plaintext_key: str | None = None,
+) -> PortalApiKeyResponse:
+    return PortalApiKeyResponse(
+        id=mapping.id,
+        label=mapping.label,
+        key_prefix=key.key_prefix,
+        active=mapping.active and key.active,
+        requests_per_minute=key.requests_per_minute,
+        monthly_request_limit=key.monthly_request_limit,
+        monthly_request_count=key.monthly_request_count,
+        usage_month=key.usage_month,
+        created_at=mapping.created_at,
+        last_used_at=key.last_used_at,
+        plaintext_key=plaintext_key,
+    )
+
+
+def _portal_invoice_response(invoice: PortalInvoice) -> PortalInvoiceResponse:
+    return PortalInvoiceResponse.model_validate(invoice)
+
+
+def _portal_key_rows(db: Session, user_id: str) -> list[tuple[PortalApiKey, PublicApiKey]]:
+    return list(
+        db.execute(
+            select(PortalApiKey, PublicApiKey)
+            .join(PublicApiKey, PortalApiKey.public_api_key_id == PublicApiKey.id)
+            .where(PortalApiKey.user_id == user_id)
+            .order_by(desc(PortalApiKey.created_at))
+        )
+    )
+
+
+def _portal_dashboard_response(db: Session, user: PortalUser) -> PortalDashboardResponse:
+    plan = db.get(PortalPlan, user.plan_id) if user.plan_id else None
+    api_keys = [
+        _portal_api_key_response(mapping, key)
+        for mapping, key in _portal_key_rows(db, user.id)
+    ]
+    invoices = [
+        _portal_invoice_response(invoice)
+        for invoice in db.scalars(
+            select(PortalInvoice)
+            .where(PortalInvoice.user_id == user.id)
+            .order_by(desc(PortalInvoice.issued_at))
+            .limit(20)
+        )
+    ]
+    return PortalDashboardResponse(
+        user=_portal_user_response(user, plan),
+        plan=_portal_plan_response(plan),
+        api_keys=api_keys,
+        invoices=invoices,
+        hidden_admin_slug=settings.portal_hidden_admin_slug if user.is_admin else None,
+    )
+
+
+@app.post("/api/v1/portal/register", response_model=PortalDashboardResponse)
+def portal_register(payload: PortalRegisterRequest, response: Response, db: Session = Depends(get_db)) -> PortalDashboardResponse:
+    ensure_free_plan(db)
+    email = _normalize_email(payload.email)
+    existing = db.scalar(select(PortalUser).where(func.lower(PortalUser.email) == email))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    is_first_user = not bool(db.scalar(select(func.count()).select_from(PortalUser)) or 0)
+    free_plan = db.scalar(select(PortalPlan).where(PortalPlan.code == "free"))
+    if free_plan is None:
+        free_plan = ensure_free_plan(db)
+    user = PortalUser(
+        full_name=payload.full_name.strip(),
+        email=email,
+        organization=(payload.organization or "").strip() or None,
+        password_hash=hash_password(payload.password),
+        plan_id=free_plan.id,
+        is_admin=is_first_user,
+        active=True,
+        billing_status="active",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    db.add(
+        PortalInvoice(
+            user_id=user.id,
+            plan_code=free_plan.code,
+            amount_inr=free_plan.monthly_price_inr,
+            currency="INR",
+            status="free" if free_plan.monthly_price_inr == 0 else "open",
+            notes="Account created on the GeoAtlas commercial API portal.",
+        )
+    )
+    db.commit()
+    create_portal_session(db, user, response)
+    return _portal_dashboard_response(db, user)
+
+
+@app.post("/api/v1/portal/login", response_model=PortalDashboardResponse)
+def portal_login(payload: PortalLoginRequest, response: Response, db: Session = Depends(get_db)) -> PortalDashboardResponse:
+    email = _normalize_email(payload.email)
+    user = db.scalar(select(PortalUser).where(func.lower(PortalUser.email) == email))
+    if user is None or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    if not user.active:
+        raise HTTPException(status_code=403, detail="This account is inactive.")
+    create_portal_session(db, user, response)
+    return _portal_dashboard_response(db, user)
+
+
+@app.post("/api/v1/portal/logout")
+def portal_logout(
+    response: Response,
+    session_token: str | None = Cookie(default=None, alias=PORTAL_SESSION_COOKIE),
+    db: Session = Depends(get_db),
+) -> dict:
+    clear_portal_session(db, response, session_token)
+    return {"status": "signed_out"}
+
+
+@app.get("/api/v1/portal/me", response_model=PortalDashboardResponse)
+def portal_me(user: PortalUser = Depends(require_portal_user), db: Session = Depends(get_db)) -> PortalDashboardResponse:
+    return _portal_dashboard_response(db, user)
+
+
+@app.get("/api/v1/portal/plans", response_model=list[PortalPlanResponse])
+def portal_plans(db: Session = Depends(get_db)) -> list[PortalPlanResponse]:
+    plans = list(
+        db.scalars(
+            select(PortalPlan)
+            .where(PortalPlan.public_visible.is_(True), PortalPlan.active.is_(True))
+            .order_by(PortalPlan.monthly_price_inr, PortalPlan.name)
+        )
+    )
+    return [PortalPlanResponse.model_validate(plan) for plan in plans]
+
+
+@app.post("/api/v1/portal/api-keys", response_model=PortalApiKeyResponse)
+def portal_create_api_key(
+    payload: PortalCreateApiKeyRequest,
+    user: PortalUser = Depends(require_portal_user),
+    db: Session = Depends(get_db),
+) -> PortalApiKeyResponse:
+    plan = db.get(PortalPlan, user.plan_id) if user.plan_id else ensure_free_plan(db)
+    active_key_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(PortalApiKey)
+            .where(PortalApiKey.user_id == user.id, PortalApiKey.active.is_(True))
+        )
+        or 0
+    )
+    if plan and active_key_count >= plan.max_api_keys:
+        raise HTTPException(status_code=400, detail="API key limit reached for this plan.")
+    key, plaintext = create_public_api_key(
+        db,
+        payload.label.strip(),
+        requests_per_minute=(plan.requests_per_minute if plan else settings.public_api_default_rpm),
+        monthly_request_limit=(plan.monthly_request_limit if plan else settings.public_api_default_monthly_limit),
+    )
+    mapping = PortalApiKey(
+        user_id=user.id,
+        public_api_key_id=key.id,
+        label=payload.label.strip(),
+        active=True,
+    )
+    db.add(mapping)
+    db.commit()
+    db.refresh(mapping)
+    return _portal_api_key_response(mapping, key, plaintext_key=plaintext)
+
+
+@app.post("/api/v1/portal/api-keys/{key_id}/revoke")
+def portal_revoke_api_key(
+    key_id: str,
+    user: PortalUser = Depends(require_portal_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    row = db.execute(
+        select(PortalApiKey, PublicApiKey)
+        .join(PublicApiKey, PortalApiKey.public_api_key_id == PublicApiKey.id)
+        .where(PortalApiKey.id == key_id, PortalApiKey.user_id == user.id)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found.")
+    mapping, key = row
+    mapping.active = False
+    mapping.revoked_at = datetime.now(timezone.utc)
+    key.active = False
+    db.commit()
+    return {"status": "revoked"}
+
+
+@app.get("/api/v1/portal-admin/overview", response_model=PortalAdminOverviewResponse)
+def portal_admin_overview(
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> PortalAdminOverviewResponse:
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    return PortalAdminOverviewResponse(
+        total_users=int(db.scalar(select(func.count()).select_from(PortalUser)) or 0),
+        active_users=int(db.scalar(select(func.count()).select_from(PortalUser).where(PortalUser.active.is_(True))) or 0),
+        total_api_keys=int(db.scalar(select(func.count()).select_from(PortalApiKey)) or 0),
+        active_api_keys=int(db.scalar(select(func.count()).select_from(PortalApiKey).where(PortalApiKey.active.is_(True))) or 0),
+        monthly_requests=int(
+            db.scalar(
+                select(func.coalesce(func.sum(PublicApiKey.monthly_request_count), 0))
+                .where(PublicApiKey.usage_month == current_month)
+            )
+            or 0
+        ),
+        monthly_revenue_inr=int(
+            db.scalar(
+                select(func.coalesce(func.sum(PortalInvoice.amount_inr), 0))
+                .where(PortalInvoice.status.in_(["paid", "open", "free"]))
+            )
+            or 0
+        ),
+        total_invoices=int(db.scalar(select(func.count()).select_from(PortalInvoice)) or 0),
+        hidden_admin_slug=settings.portal_hidden_admin_slug,
+    )
+
+
+@app.get("/api/v1/portal-admin/users", response_model=list[PortalUserResponse])
+def portal_admin_users(
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> list[PortalUserResponse]:
+    users = list(db.scalars(select(PortalUser).order_by(desc(PortalUser.created_at))))
+    plans = {plan.id: plan for plan in db.scalars(select(PortalPlan))}
+    return [_portal_user_response(user, plans.get(user.plan_id) if user.plan_id else None) for user in users]
+
+
+@app.post("/api/v1/portal-admin/users/{user_id}", response_model=PortalUserResponse)
+def portal_admin_update_user(
+    user_id: str,
+    payload: PortalUserAdminUpdateRequest,
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> PortalUserResponse:
+    user = db.get(PortalUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if payload.plan_id:
+        plan = db.get(PortalPlan, payload.plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Plan not found.")
+        user.plan_id = plan.id
+    user.billing_status = payload.billing_status
+    user.active = payload.active
+    user.is_admin = payload.is_admin
+    db.commit()
+    db.refresh(user)
+    plan = db.get(PortalPlan, user.plan_id) if user.plan_id else None
+    return _portal_user_response(user, plan)
+
+
+@app.get("/api/v1/portal-admin/plans", response_model=list[PortalPlanResponse])
+def portal_admin_plans(
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> list[PortalPlanResponse]:
+    return [PortalPlanResponse.model_validate(plan) for plan in db.scalars(select(PortalPlan).order_by(PortalPlan.monthly_price_inr, PortalPlan.name))]
+
+
+@app.post("/api/v1/portal-admin/plans", response_model=PortalPlanResponse)
+def portal_admin_create_plan(
+    payload: PortalPlanUpsertRequest,
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> PortalPlanResponse:
+    existing = db.scalar(select(PortalPlan).where(PortalPlan.code == payload.code))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Plan code already exists.")
+    plan = PortalPlan(**payload.model_dump())
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return PortalPlanResponse.model_validate(plan)
+
+
+@app.post("/api/v1/portal-admin/plans/{plan_id}", response_model=PortalPlanResponse)
+def portal_admin_update_plan(
+    plan_id: str,
+    payload: PortalPlanUpsertRequest,
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> PortalPlanResponse:
+    plan = db.get(PortalPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+    duplicate = db.scalar(select(PortalPlan).where(PortalPlan.code == payload.code, PortalPlan.id != plan_id))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="Plan code already exists.")
+    for field, value in payload.model_dump().items():
+        setattr(plan, field, value)
+    db.commit()
+    db.refresh(plan)
+    return PortalPlanResponse.model_validate(plan)
+
+
+@app.get("/api/v1/portal-admin/api-keys", response_model=list[PortalApiKeyResponse])
+def portal_admin_api_keys(
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> list[PortalApiKeyResponse]:
+    rows = db.execute(
+        select(PortalApiKey, PublicApiKey)
+        .join(PublicApiKey, PortalApiKey.public_api_key_id == PublicApiKey.id)
+        .order_by(desc(PortalApiKey.created_at))
+    )
+    return [_portal_api_key_response(mapping, key) for mapping, key in rows]
+
+
+@app.get("/api/v1/portal-admin/invoices", response_model=list[PortalInvoiceResponse])
+def portal_admin_invoices(
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> list[PortalInvoiceResponse]:
+    return [
+        _portal_invoice_response(invoice)
+        for invoice in db.scalars(select(PortalInvoice).order_by(desc(PortalInvoice.issued_at)))
+    ]
+
+
+@app.post("/api/v1/portal-admin/invoices", response_model=PortalInvoiceResponse)
+def portal_admin_create_invoice(
+    payload: PortalInvoiceCreateRequest,
+    _: PortalUser = Depends(require_portal_admin),
+    db: Session = Depends(get_db),
+) -> PortalInvoiceResponse:
+    user = db.get(PortalUser, payload.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    invoice = PortalInvoice(
+        user_id=user.id,
+        amount_inr=payload.amount_inr,
+        status=payload.status,
+        plan_code=payload.plan_code,
+        notes=payload.notes,
+    )
+    db.add(invoice)
+    db.commit()
+    db.refresh(invoice)
+    return _portal_invoice_response(invoice)
 
 
 @app.get("/", include_in_schema=False)
@@ -816,6 +1220,12 @@ def public_items(
 ) -> PublicItemsResponse:
     settings = get_settings()
     require_ai_publication = bool(settings.ai_enabled and settings.ai_auto_analyze)
+    ai_publication_exists = exists(
+        select(AISuggestion.id).where(
+            AISuggestion.normalized_item_id == NormalizedItem.id,
+            AISuggestion.status.in_(["approved", "pending_review"]),
+        )
+    )
     candidate_limit = (
         min(max((offset + limit) * 5, 250), 500)
         if deduplicate
@@ -845,6 +1255,8 @@ def public_items(
                 NormalizedItem.created_at,
             ) >= cutoff
         )
+    if require_ai_publication:
+        statement = statement.where(ai_publication_exists)
     statement = statement.limit(candidate_limit)
     if not deduplicate:
         statement = statement.offset(offset)
@@ -877,16 +1289,16 @@ def public_items(
                     NormalizedItem.created_at,
                 ) >= cutoff
             )
+        if require_ai_publication:
+            credible_statement = credible_statement.where(ai_publication_exists)
         credible_candidates = list(
             db.scalars(credible_statement.limit(candidate_limit))
         )
         seen_ids = {item.id for item in candidates}
         candidates.extend(
             item for item in credible_candidates if item.id not in seen_ids
-    )
+        )
     suggestions = _preferred_ai_suggestions(db, [item.id for item in candidates])
-    if require_ai_publication:
-        candidates = [item for item in candidates if item.id in suggestions]
     items = (
         _deduplicate_items(candidates, suggestions)[offset:offset + limit]
         if deduplicate
@@ -907,14 +1319,7 @@ def public_items(
             ) >= cutoff
         )
     if require_ai_publication:
-        count_statement = count_statement.where(
-            exists(
-                select(AISuggestion.id).where(
-                    AISuggestion.normalized_item_id == NormalizedItem.id,
-                    AISuggestion.status.in_(["approved", "pending_review"]),
-                )
-            )
-        )
+        count_statement = count_statement.where(ai_publication_exists)
     total = int(db.scalar(count_statement) or 0)
     next_offset = offset + len(items)
     return PublicItemsResponse(

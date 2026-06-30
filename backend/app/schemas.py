@@ -331,3 +331,120 @@ class AISuggestionResponse(BaseModel):
 
 class AIReviewRequest(BaseModel):
     status: Literal["approved", "rejected"]
+
+
+class PortalRegisterRequest(BaseModel):
+    full_name: str = Field(min_length=2, max_length=160)
+    email: str = Field(min_length=5, max_length=255)
+    organization: str | None = Field(default=None, max_length=255)
+    password: str = Field(min_length=8, max_length=160)
+
+
+class PortalLoginRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=8, max_length=160)
+
+
+class PortalPlanResponse(BaseModel):
+    id: str
+    code: str
+    name: str
+    description: str | None
+    monthly_price_inr: int
+    requests_per_minute: int
+    monthly_request_limit: int
+    max_api_keys: int
+    active: bool
+    public_visible: bool
+
+    model_config = {"from_attributes": True}
+
+
+class PortalUserResponse(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    organization: str | None
+    is_admin: bool
+    active: bool
+    billing_status: str
+    created_at: datetime
+    plan: PortalPlanResponse | None = None
+
+
+class PortalApiKeyResponse(BaseModel):
+    id: str
+    label: str
+    key_prefix: str
+    active: bool
+    requests_per_minute: int
+    monthly_request_limit: int
+    monthly_request_count: int
+    usage_month: str
+    created_at: datetime
+    last_used_at: datetime | None
+    plaintext_key: str | None = None
+
+
+class PortalInvoiceResponse(BaseModel):
+    id: str
+    plan_code: str
+    amount_inr: int
+    currency: str
+    status: str
+    due_date: datetime | None
+    paid_at: datetime | None
+    notes: str | None
+    issued_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PortalDashboardResponse(BaseModel):
+    user: PortalUserResponse
+    plan: PortalPlanResponse | None
+    api_keys: list[PortalApiKeyResponse]
+    invoices: list[PortalInvoiceResponse]
+    hidden_admin_slug: str | None = None
+
+
+class PortalCreateApiKeyRequest(BaseModel):
+    label: str = Field(min_length=2, max_length=120)
+
+
+class PortalAdminOverviewResponse(BaseModel):
+    total_users: int
+    active_users: int
+    total_api_keys: int
+    active_api_keys: int
+    monthly_requests: int
+    monthly_revenue_inr: int
+    total_invoices: int
+    hidden_admin_slug: str
+
+
+class PortalPlanUpsertRequest(BaseModel):
+    code: str = Field(min_length=2, max_length=32)
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    monthly_price_inr: int = Field(ge=0)
+    requests_per_minute: int = Field(ge=1, le=100000)
+    monthly_request_limit: int = Field(ge=1)
+    max_api_keys: int = Field(ge=1, le=100)
+    active: bool = True
+    public_visible: bool = True
+
+
+class PortalInvoiceCreateRequest(BaseModel):
+    user_id: str
+    amount_inr: int = Field(ge=0)
+    status: str = Field(min_length=2, max_length=32)
+    plan_code: str = Field(min_length=2, max_length=32)
+    notes: str | None = Field(default=None, max_length=500)
+
+
+class PortalUserAdminUpdateRequest(BaseModel):
+    plan_id: str | None = None
+    billing_status: str = Field(min_length=2, max_length=32)
+    active: bool = True
+    is_admin: bool = False

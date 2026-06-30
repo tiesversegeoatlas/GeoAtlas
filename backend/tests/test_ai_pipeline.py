@@ -592,6 +592,61 @@ class AIPersistenceTests(unittest.TestCase):
                 self.assertEqual(response.items[0].id, item.id)
                 self.assertEqual(public_item(item.id, db=db).id, item.id)
 
+    def test_public_items_return_ai_ready_rows_even_when_newer_raw_rows_lack_ai(self) -> None:
+        with Session(self.engine) as db:
+            item = self._create_item(db)
+            item_id = item.id
+            newer_raw = NormalizedItem(
+                raw_item_id="00000000-0000-0000-0000-000000000099",
+                source_id=item.source_id,
+                title="Newer raw item awaiting AI",
+                published_at=datetime.now(timezone.utc),
+                extraction_status="processed",
+            )
+            db.add(newer_raw)
+            suggestion = AISuggestion(
+                normalized_item_id=item.id,
+                provider="heuristic",
+                model_name="geoatlas-rules-v1",
+                prompt_version="test",
+                input_hash="publishable-item" * 4 + "abcd",
+                confidence=0.9,
+                output_payload={
+                    "summary": "AI summary.",
+                    "generated_content": "AI generated content.",
+                    "risk_level": "high",
+                    "risk_score": 80,
+                    "urgency_score": 78,
+                    "importance_score": 76,
+                    "is_breaking": True,
+                    "breaking_reason": "Developing high-impact report.",
+                    "claim_quality_score": 81,
+                },
+                status="pending_review",
+            )
+            db.add(suggestion)
+            db.commit()
+
+        settings = get_settings()
+        settings.ai_enabled = True
+        settings.ai_auto_analyze = True
+        local_sessions = sessionmaker(bind=self.engine)
+        with (
+            patch("app.main.get_settings", return_value=settings),
+            patch("app.main.SessionLocal", local_sessions),
+        ):
+            with Session(self.engine) as db:
+                response = public_items(
+                    db=db,
+                    limit=1,
+                    offset=0,
+                    include_body=True,
+                    deduplicate=False,
+                )
+                self.assertEqual(len(response.items), 1)
+                self.assertEqual(response.items[0].id, item_id)
+                self.assertEqual(response.total, 1)
+
     def test_ai_location_overrides_only_source_scope_location_fallback(self) -> None:
         with Session(self.engine) as db:
             item = self._create_item(db)
